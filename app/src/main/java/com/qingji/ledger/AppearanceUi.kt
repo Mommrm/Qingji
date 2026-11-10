@@ -44,22 +44,34 @@ fun categoryVector(name:String):ImageVector=when {
 @Composable fun AmountKeypad(onKey:(String)->Unit){
     Column(verticalArrangement=Arrangement.spacedBy(5.dp)){
         listOf(listOf("1","2","3"),listOf("4","5","6"),listOf("7","8","9"),listOf(".","0","DEL")).forEach{row->Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){row.forEach{key->
-            Surface(onClick={onKey(key)},modifier=Modifier.weight(1f).height(47.dp),shape=RoundedCornerShape(10.dp),color=MaterialTheme.colorScheme.surfaceContainerLow){Box(contentAlignment=Alignment.Center){if(key=="DEL")Icon(Icons.Outlined.Backspace,"删除一位")else Text(key,fontSize=23.sp)}}
+            Surface(onClick={onKey(key)},modifier=Modifier.weight(1f).height(48.dp),shape=RoundedCornerShape(10.dp),color=MaterialTheme.colorScheme.surfaceContainerLow){Box(contentAlignment=Alignment.Center){if(key=="DEL")Icon(Icons.Outlined.Backspace,"删除一位")else Text(key,fontSize=23.sp)}}
         }}}
     }
 }
-@Composable fun CompactAssetChoice(title:String,s:Snapshot,selectedId:String?,onSelect:(String?)->Unit,includeNone:Boolean=true){
+@Composable fun CompactAssetChoice(title:String,s:Snapshot,selectedId:String?,onSelect:(String?)->Unit,includeNone:Boolean=true,pool:String?=null){
     var expanded by remember{mutableStateOf(false)}
     val asset=s.assets.find{it.id==selectedId}
+    val balances=remember(s.assets,s.entries,s.transfers,s.adjustments){s.assetBalances()}
     Box{
         OutlinedButton(onClick={expanded=true},modifier=Modifier.fillMaxWidth()){
             AssetBadge(asset?.kind?:"OTHER",24.dp);Spacer(Modifier.width(8.dp))
             Text(asset?.name?:title,Modifier.weight(1f),maxLines=1)
-            Icon(Icons.Outlined.ExpandMore,"选择资产")
+            Icon(Icons.Outlined.ExpandMore,"选择账户")
         }
-        DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=300.dp)){
+        DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=380.dp)){
             if(includeNone)DropdownMenuItem(text={Text("不关联资产")},onClick={onSelect(null);expanded=false})
-            s.assets.filter{!it.archived||it.id==selectedId}.forEach{a->DropdownMenuItem(leadingIcon={AssetBadge(a.kind,28.dp)},text={Column{Text(a.name+if(a.archived)"（已归档）" else "");Hint("余额 ¥"+money(s.assetBalances()[a.id]?:0))}},onClick={onSelect(a.id);expanded=false})}
+            val options=s.assets.filter{(!it.archived||it.id==selectedId)&&(pool==null||normalizePool(it.pool)==pool)}
+            val assetOptions=options.filter{!isDebtKind(it.kind)}
+            val debtOptions=options.filter{isDebtKind(it.kind)}
+            if(assetOptions.isNotEmpty()){
+                Text("资产账户",Modifier.padding(start=12.dp,top=6.dp,bottom=2.dp),style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
+                assetOptions.forEach{a->DropdownMenuItem(leadingIcon={AssetBadge(a.kind,28.dp)},text={Column{Text(a.name+if(a.archived)"（已归档）" else "",maxLines=1);Hint(poolLabel(a.pool)+" · 余额 ¥"+money(balances[a.id]?:0))}},onClick={onSelect(a.id);expanded=false})}
+            }
+            if(debtOptions.isNotEmpty()){
+                if(assetOptions.isNotEmpty())HorizontalDivider()
+                Text("负债账户",Modifier.padding(start=12.dp,top=6.dp,bottom=2.dp),style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.error)
+                debtOptions.forEach{a->val bal=balances[a.id]?:0L;DropdownMenuItem(leadingIcon={AssetBadge(a.kind,28.dp)},text={Column{Text(a.name+if(a.archived)"（已归档）" else "",maxLines=1);Text(if(bal<0)"欠款 ¥"+money(-bal) else "已结清 · 溢缴 ¥"+money(bal),color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)}},onClick={onSelect(a.id);expanded=false})}
+            }
         }
     }
 }

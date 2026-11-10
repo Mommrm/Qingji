@@ -43,9 +43,10 @@ import androidx.compose.ui.unit.*
     TextButton(onClick={show=true}){Icon(Icons.Outlined.EditNote,null,Modifier.size(18.dp));Spacer(Modifier.width(4.dp));Text(note.ifBlank{"备注"}.take(14),maxLines=1)}
     if(show)TextInputDialog("备注",note,500,{show=false},onChange)
 }
-@Composable fun AssetKindPicker(kind:String,onSelect:(String)->Unit){
+/** 只显示当前账户性质对应的类型组：资产 5 类 / 负债 4 类，避免两组混选。 */
+@Composable fun AssetKindPicker(kind:String, kinds:Map<String,String> = ASSET_KINDS, onSelect:(String)->Unit){
     FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp),verticalArrangement=Arrangement.spacedBy(2.dp),maxItemsInEachRow=5){
-        ASSET_KINDS.forEach{(id,label)->Column(Modifier.width(60.dp).clickable{onSelect(id)}.padding(vertical=8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(7.dp)){
+        kinds.forEach{(id,label)->Column(Modifier.width(60.dp).clickable{onSelect(id)}.padding(vertical=8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(7.dp)){
             Box{AssetBadge(id,42.dp);if(kind==id)Surface(shape=RoundedCornerShape(8.dp),color=MaterialTheme.colorScheme.primaryContainer,modifier=Modifier.align(Alignment.BottomEnd).offset(4.dp,4.dp)){Icon(Icons.Outlined.Check,null,Modifier.size(16.dp),tint=MaterialTheme.colorScheme.onPrimaryContainer)}}
             Text(label,fontSize=11.sp,maxLines=1,fontWeight=if(id==kind)FontWeight.Bold else FontWeight.Normal,color=if(id==kind)MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }}

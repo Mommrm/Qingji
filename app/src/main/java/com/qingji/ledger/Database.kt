@@ -61,7 +61,7 @@ interface LedgerDao {
     @Query("DELETE FROM goals") suspend fun clearGoals()
     @Query("DELETE FROM goal_events") suspend fun clearEvents()
 }
-@Database(entities = [Entry::class, Category::class, Budget::class, Goal::class, GoalEvent::class,AssetAccount::class,AssetTransfer::class,AssetAdjustment::class], version = 2, exportSchema = true)
+@Database(entities = [Entry::class, Category::class, Budget::class, Goal::class, GoalEvent::class,AssetAccount::class,AssetTransfer::class,AssetAdjustment::class], version = 3, exportSchema = true)
 abstract class LedgerDatabase : RoomDatabase() {
     abstract fun dao(): LedgerDao
     companion object {
@@ -80,6 +80,15 @@ abstract class LedgerDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_asset_adjustments_date` ON `asset_adjustments` (`date`)")
             }
         }
-        fun create(context: Context) = Room.databaseBuilder(context, LedgerDatabase::class.java, "qingji.db").addMigrations(MIGRATION_1_2).build()
+        /** v3：账单加资金池 / 预算标记，资产账户加资金池。旧 DataStore 里的预算标记由 Repository 启动时搬运。 */
+        val MIGRATION_2_3=object:Migration(2,3){
+            override fun migrate(db:SupportSQLiteDatabase){
+                db.execSQL("ALTER TABLE `entries` ADD COLUMN `pool` TEXT NOT NULL DEFAULT 'LIQUID'")
+                db.execSQL("ALTER TABLE `entries` ADD COLUMN `inBudget` INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE `entries` ADD COLUMN `repayment` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `asset_accounts` ADD COLUMN `pool` TEXT NOT NULL DEFAULT 'LIQUID'")
+            }
+        }
+        fun create(context: Context) = Room.databaseBuilder(context, LedgerDatabase::class.java, "qingji.db").addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     }
 }

@@ -29,7 +29,10 @@ data class Entry(
     val createdAt: Long = System.currentTimeMillis(), val updatedAt: Long = System.currentTimeMillis(),
     val deletedAt: Long? = null, val revision: Long = 1, val syncState: String = "LOCAL",
     @ColumnInfo(defaultValue = "NULL") val assetId: String? = null,
-    @ColumnInfo(defaultValue = "0") val affectsBalance: Boolean = true
+    @ColumnInfo(defaultValue = "0") val affectsBalance: Boolean = true,
+    @ColumnInfo(defaultValue = "'LIQUID'") val pool: String = POOL_LIQUID,
+    @ColumnInfo(defaultValue = "1") val inBudget: Boolean = true,
+    @ColumnInfo(defaultValue = "0") val repayment: Boolean = false
 )
 @Entity(tableName = "budgets", primaryKeys = ["period", "scope"])
 data class Budget(val period: String, val scope: String = "", val limit: Long, val effectiveFrom: String = "")
@@ -38,6 +41,7 @@ data class Goal(@PrimaryKey val id: String = newId(), val title: String, val tar
 @Entity(tableName = "goal_events", indices = [Index("goalId")])
 data class GoalEvent(@PrimaryKey val id: String = newId(), val goalId: String, val amount: Long, val date: String = LocalDate.now().toString(), val note: String = "", val createdAt: Long = System.currentTimeMillis())
 
+/** 预算标记自 schema v3 起存进 Room 的 entries 表；下面两个集合只用于读取旧备份/旧偏好，不再写入业务口径。 */
 data class Settings(val theme: String = "SYSTEM", val enabled: Boolean = false, val time: String = "21:30", val days: Set<Int> = (1..7).toSet(), val skip: Boolean = true, val reminderRevision: Long = 1, val lastSentDate: String = "",val accent:String="SUN", val budgetExcludedEntries:Set<String> = emptySet(), val repaymentEntries:Set<String> = emptySet())
 data class Snapshot(val entries: List<Entry> = emptyList(), val categories: List<Category> = emptyList(), val budgets: List<Budget> = emptyList(), val goals: List<Goal> = emptyList(), val events: List<GoalEvent> = emptyList(), val settings: Settings = Settings(), val ready: Boolean = false, val assets: List<AssetAccount> = emptyList(), val transfers: List<AssetTransfer> = emptyList(), val adjustments: List<AssetAdjustment> = emptyList()) {
     fun category(id: String) = categories.find { it.id == id }
@@ -114,23 +118,31 @@ fun nextReminderText(settings: Settings, now: ZonedDateTime = ZonedDateTime.now(
     val next = nextReminder(settings, now) ?: return "暂无下次提醒"
     return "下次提醒：" + next.format(java.time.format.DateTimeFormatter.ofPattern("M月d日 E HH:mm", java.util.Locale.CHINA))
 }
-/** 预算排除以「账单」为单位：记账时标记还款，或手动关闭「计入预算」。 */
+/** 预算排除以「账单」为单位，标记存于 Entry 本身（Room，v3+）：记账时标记还款，或手动关闭「计入预算」。 */
 fun Snapshot.excludedBudgetEntries(entries: List<Entry>): List<Entry> =
-    entries.filter { it.deletedAt == null && it.type == EXPENSE && it.id in settings.budgetExcludedEntries }
-fun Snapshot.isRepayment(entry: Entry): Boolean = entry.id in settings.repaymentEntries
-fun budgetExpense(entries: List<Entry>, excluded: Set<String>): Long {
-    if (excluded.isEmpty()) return totals(entries).expense
+    entries.filter { it.deletedAt == null && it.type == EXPENSE && !it.inBudget }
+fun Snapshot.isRepayment(entry: Entry): Boolean = entry.repayment
+fun budgetExpense(entries: List<Entry>): Long {
     val byId = entries.associateBy { it.id }
     var gross = 0L
     var refunds = 0L
     entries.filter { it.deletedAt == null }.forEach { e ->
         when (e.type) {
-            EXPENSE -> if (e.id !in excluded) gross += e.amount
+            EXPENSE -> if (e.inBudget) gross += e.amount
             REFUND -> {
                 val origin = e.refundOf?.let { byId[it] }
-                if (origin == null || origin.id !in excluded) refunds += e.amount
+                if (origin == null || origin.inBudget) refunds += e.amount
             }
         }
     }
     return gross - refunds
 }
+/** 回收站恢复顺序：退款单若关联的原支出也被软删，必须先恢复原支出，否则关联校验会失败。 */
+fun restorationOrder(entries: List<Entry>, id: String): List<String> {
+    val target = entries.find { it.id == id } ?: return emptyList()
+    val origin = target.refundOf?.let { ref -> entries.find { it.id == ref && it.deletedAt != null } }
+    return listOfNotNull(origin?.id, target.id)
+}
+/** 首页搜索匹配备注 / 分类名 / 资产名，大小写不敏感。调用方决定范围（全部账本或当前月）。 */
+fun Snapshot.filterByQuery(entries: List<Entry>, query: String): List<Entry> =
+    entries.filter { e -> (e.note + (category(e.categoryId)?.name ?: "") + (assets.find { it.id == e.assetId }?.name ?: "")).contains(query, true) }

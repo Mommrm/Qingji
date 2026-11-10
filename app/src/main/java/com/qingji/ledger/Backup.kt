@@ -14,13 +14,13 @@ object BackupCodec {
     private fun obj(vararg pairs: Pair<String, Any?>): JSONObject = JSONObject().apply { pairs.forEach { (k,v) -> put(k,v ?: JSONObject.NULL) } }
     private fun array(list: List<JSONObject>) = JSONArray(list)
     fun encode(s: Snapshot): String = obj(
-        "app" to "QingJi", "schemaVersion" to 2, "currency" to "CNY", "exportedAt" to Instant.now().toString(),
-        "entries" to array(s.entries.map { e -> obj("id" to e.id,"type" to e.type,"amount" to e.amount,"categoryId" to e.categoryId,"date" to e.date,"time" to e.time,"note" to e.note,"refundOf" to e.refundOf,"zoneId" to e.zoneId,"createdAt" to e.createdAt,"updatedAt" to e.updatedAt,"deletedAt" to e.deletedAt,"revision" to e.revision,"syncState" to e.syncState,"assetId" to e.assetId,"affectsBalance" to e.affectsBalance) }),
+        "app" to "QingJi", "schemaVersion" to 3, "currency" to "CNY", "exportedAt" to Instant.now().toString(),
+        "entries" to array(s.entries.map { e -> obj("id" to e.id,"type" to e.type,"amount" to e.amount,"categoryId" to e.categoryId,"date" to e.date,"time" to e.time,"note" to e.note,"refundOf" to e.refundOf,"zoneId" to e.zoneId,"createdAt" to e.createdAt,"updatedAt" to e.updatedAt,"deletedAt" to e.deletedAt,"revision" to e.revision,"syncState" to e.syncState,"assetId" to e.assetId,"affectsBalance" to e.affectsBalance,"pool" to e.pool,"inBudget" to e.inBudget,"repayment" to e.repayment) }),
         "categories" to array(s.categories.map { c -> obj("id" to c.id,"name" to c.name,"type" to c.type,"icon" to c.icon,"sortOrder" to c.sortOrder,"archived" to c.archived) }),
         "budgets" to array(s.budgets.map { b -> obj("period" to b.period,"scope" to b.scope,"limit" to b.limit,"effectiveFrom" to b.effectiveFrom) }),
         "goals" to array(s.goals.map { g -> obj("id" to g.id,"title" to g.title,"target" to g.target,"due" to g.due,"createdAt" to g.createdAt) }),
         "events" to array(s.events.map { e -> obj("id" to e.id,"goalId" to e.goalId,"amount" to e.amount,"date" to e.date,"note" to e.note,"createdAt" to e.createdAt) }),
-        "assets" to array(s.assets.map{a->obj("id" to a.id,"name" to a.name,"kind" to a.kind,"openingBalance" to a.openingBalance,"archived" to a.archived,"createdAt" to a.createdAt,"updatedAt" to a.updatedAt)}),
+        "assets" to array(s.assets.map{a->obj("id" to a.id,"name" to a.name,"kind" to a.kind,"openingBalance" to a.openingBalance,"archived" to a.archived,"createdAt" to a.createdAt,"updatedAt" to a.updatedAt,"pool" to a.pool)}),
         "transfers" to array(s.transfers.map{t->obj("id" to t.id,"fromAssetId" to t.fromAssetId,"toAssetId" to t.toAssetId,"amount" to t.amount,"date" to t.date,"note" to t.note,"createdAt" to t.createdAt,"updatedAt" to t.updatedAt,"deletedAt" to t.deletedAt)}),
         "adjustments" to array(s.adjustments.map{a->obj("id" to a.id,"assetId" to a.assetId,"delta" to a.delta,"targetBalance" to a.targetBalance,"date" to a.date,"note" to a.note,"createdAt" to a.createdAt,"updatedAt" to a.updatedAt,"deletedAt" to a.deletedAt)}),
         "settings" to obj("theme" to s.settings.theme,"accent" to s.settings.accent,"enabled" to s.settings.enabled,"time" to s.settings.time,"days" to JSONArray(s.settings.days.sorted()),"skip" to s.settings.skip,"budgetExcludedEntries" to JSONArray(s.settings.budgetExcludedEntries.sorted()),"repaymentEntries" to JSONArray(s.settings.repaymentEntries.sorted()))
@@ -34,17 +34,19 @@ object BackupCodec {
         require(raw.toByteArray(Charsets.UTF_8).size <= 50*1024*1024) { "备份不能超过50MB" }
         val root = JSONObject(raw)
         val version=root.getInt("schemaVersion")
-        require(root.getString("app") == "QingJi" && version in 1..2 && root.getString("currency") == "CNY") { "不支持此备份格式或版本" }
+        require(root.getString("app") == "QingJi" && version in 1..3 && root.getString("currency") == "CNY") { "不支持此备份格式或版本" }
         val cats = list(root,"categories",1000).map { c -> Category(text(c,"id"),text(c,"name",20),text(c,"type"),text(c,"icon",10),c.getInt("sortOrder"),c.getBoolean("archived")) }
         unique(cats) { it.id }; require(cats.isNotEmpty() && cats.all { it.name.isNotBlank() && it.type in listOf(EXPENSE,INCOME) }) { "备份分类无效" }
         val catMap = cats.associateBy { it.id }
-        val entries = list(root,"entries").map { e -> Entry(text(e,"id"),text(e,"type"),long(e,"amount"),text(e,"categoryId"),text(e,"date"),text(e,"time"),text(e,"note",500),optional(e,"refundOf"),text(e,"zoneId"),long(e,"createdAt"),long(e,"updatedAt"),if(e.isNull("deletedAt")) null else long(e,"deletedAt"),long(e,"revision"),text(e,"syncState"),if(version>=2)optional(e,"assetId")else null,if(version>=2)e.getBoolean("affectsBalance")else false) }
+        var entries = list(root,"entries").map { e -> Entry(text(e,"id"),text(e,"type"),long(e,"amount"),text(e,"categoryId"),text(e,"date"),text(e,"time"),text(e,"note",500),optional(e,"refundOf"),text(e,"zoneId"),long(e,"createdAt"),long(e,"updatedAt"),if(e.isNull("deletedAt")) null else long(e,"deletedAt"),long(e,"revision"),text(e,"syncState"),if(version>=2)optional(e,"assetId")else null,if(version>=2)e.getBoolean("affectsBalance")else false,if(version>=3)normalizePool(e.optString("pool",POOL_LIQUID))else POOL_LIQUID,if(version>=3)e.optBoolean("inBudget",true)else true,if(version>=3)e.optBoolean("repayment",false)else false) }
         unique(entries) { it.id }
         entries.forEach { e ->
             require(e.amount in 1..MAX_MONEY && e.type in listOf(EXPENSE,INCOME,REFUND) && e.revision>0) { "备份收支金额或类型无效" }
-            LocalDate.parse(e.date); LocalTime.parse(e.time); ZoneId.of(e.zoneId)
+            LocalDate.parse(e.date).also{require(!it.isAfter(LocalDate.now())){"备份含未来日期的账单"}}
+            LocalTime.parse(e.time); ZoneId.of(e.zoneId)
             require(catMap[e.categoryId]?.type == if(e.type==INCOME) INCOME else EXPENSE) { "备份分类引用无效" }
             require(e.createdAt>=0 && e.updatedAt>=0) { "备份时间戳无效" }
+            e.deletedAt?.let{require(it>=0){"备份删除时间无效"}}
         }
         val entryMap = entries.associateBy { it.id }
         val refunds = entries.filter { it.type == REFUND }
@@ -73,21 +75,28 @@ object BackupCodec {
         require(days.isNotEmpty() && days.all { it in 1..7 } && theme in listOf("SYSTEM","LIGHT","DARK")) { "备份偏好设置无效" }
         val time=text(p,"time");val t=LocalTime.parse(time);require(t<LocalTime.of(23,0)) { "提醒时间需早于23:00" }
         val accent=p.optString("accent","SUN");require(validAccent(accent)){"备份主题色格式无效"}
-        val assets=if(version<2)emptyList()else list(root,"assets",1000).map{a->AssetAccount(text(a,"id"),text(a,"name",30),text(a,"kind"),long(a,"openingBalance"),a.getBoolean("archived"),long(a,"createdAt"),long(a,"updatedAt"))}
-        unique(assets){it.id};assets.forEach{require(it.name.isNotBlank()&&it.kind in ASSET_KINDS&&it.openingBalance in 0..MAX_MONEY&&it.createdAt>=0&&it.updatedAt>=0){"备份资产信息无效"}}
+        // v1/v2 把预算标记放在 settings，恢复时写回账单字段；v3 起标记就在账单上
+        if(version<3)entries=entries.map{e->when{
+            e.id in repayments -> e.copy(inBudget=false,repayment=true)
+            e.id in excludedEntries -> e.copy(inBudget=false)
+            else -> e
+        }}
+        // 旧版没有负号，负债类账户的正期初按「欠款」翻负；负债账户池固定流动资金
+        val assets=(if(version<2)emptyList()else list(root,"assets",1000).map{a->AssetAccount(text(a,"id"),text(a,"name",30),text(a,"kind"),long(a,"openingBalance"),a.getBoolean("archived"),long(a,"createdAt"),long(a,"updatedAt"),if(version>=3)normalizePool(a.optString("pool",POOL_LIQUID))else POOL_LIQUID)}).map{a->when{isDebtKind(a.kind)&&a.openingBalance>0->a.copy(openingBalance=-a.openingBalance,pool=POOL_LIQUID);isDebtKind(a.kind)->a.copy(pool=POOL_LIQUID);else->a}}
+        unique(assets){it.id};assets.forEach{require(it.name.isNotBlank()&&it.kind in ACCOUNT_KINDS&&(if(isDebtKind(it.kind))it.openingBalance in -MAX_MONEY..0 else it.openingBalance in 0..MAX_MONEY)&&it.createdAt>=0&&it.updatedAt>=0){"备份账户信息无效"}}
         val assetIds=assets.map{it.id}.toSet()
         entries.forEach{require(it.assetId==null||it.assetId in assetIds){"备份记账引用的资产不存在"}}
         val transfers=if(version<2)emptyList()else list(root,"transfers").map{a->AssetTransfer(text(a,"id"),text(a,"fromAssetId"),text(a,"toAssetId"),long(a,"amount"),text(a,"date"),text(a,"note",500),long(a,"createdAt"),long(a,"updatedAt"),if(a.isNull("deletedAt"))null else long(a,"deletedAt"))}
-        unique(transfers){it.id};transfers.forEach{require(it.fromAssetId in assetIds&&it.toAssetId in assetIds&&it.fromAssetId!=it.toAssetId&&it.amount in 1..MAX_MONEY){"备份转账信息无效"};LocalDate.parse(it.date)}
+        unique(transfers){it.id};transfers.forEach{require(it.fromAssetId in assetIds&&it.toAssetId in assetIds&&it.fromAssetId!=it.toAssetId&&it.amount in 1..MAX_MONEY){"备份转账信息无效"};LocalDate.parse(it.date).also{d->require(!d.isAfter(LocalDate.now())){"备份含未来日期的转账"}};it.deletedAt?.let{v->require(v>=0){"备份删除时间无效"}}}
         val adjustments=if(version<2)emptyList()else list(root,"adjustments").map{a->AssetAdjustment(text(a,"id"),text(a,"assetId"),long(a,"delta"),long(a,"targetBalance"),text(a,"date"),text(a,"note",500),long(a,"createdAt"),long(a,"updatedAt"),if(a.isNull("deletedAt"))null else long(a,"deletedAt"))}
-        unique(adjustments){it.id};adjustments.forEach{require(it.assetId in assetIds&&it.delta!=0L&&it.delta!=Long.MIN_VALUE&&it.targetBalance in 0..MAX_MONEY){"备份余额校准无效"};LocalDate.parse(it.date)}
+        unique(adjustments){it.id};adjustments.forEach{require(it.assetId in assetIds&&it.delta!=0L&&it.delta!=Long.MIN_VALUE&&it.targetBalance in -MAX_MONEY..MAX_MONEY){"备份余额校准无效"};LocalDate.parse(it.date).also{d->require(!d.isAfter(LocalDate.now())){"备份含未来日期的校准"}};it.deletedAt?.let{v->require(v>=0){"备份删除时间无效"}}}
         val snapshot=Snapshot(entries,cats,budgets,goals,events,Settings(theme=theme,enabled=p.getBoolean("enabled"),time=time,days=days,skip=p.getBoolean("skip"),accent=normalizeAccent(accent),budgetExcludedEntries=excludedEntries,repaymentEntries=repayments),true,assets,transfers,adjustments)
         val balances=snapshot.assetBalances();snapshot.assetTotal();require(assets.filter{it.archived}.all{balances[it.id]==0L}){"已归档资产的余额应为0"}
         return snapshot
     }
     fun csv(s: Snapshot, range: DateRange): String {
         fun cell(s: String): String { val safe=if(s.firstOrNull() in listOf('=','+','-','@','\t','\r')) "'"+s else s;return "\""+safe.replace("\"","\"\"")+"\"" }
-        return "\uFEFF日期,时间,类型,分类,金额(元),备注,原支出ID,资产账户,影响资产余额\r\n" + s.live().filter { range.contains(it.date) }.joinToString("\r\n") { e -> listOf(e.date,e.time,when(e.type){INCOME->"收入";REFUND->"退款";else->"支出"},s.category(e.categoryId)?.name?:"未知",money(e.amount),e.note,e.refundOf?:"",s.assets.find{it.id==e.assetId}?.name?:"未关联",if(e.assetId!=null&&e.affectsBalance)"是" else "否").joinToString(",",transform=::cell) }
+        return "\uFEFF日期,时间,类型,分类,金额(元),备注,原支出ID,资产账户,资金类型,计入预算,还款,影响资产余额\r\n" + s.live().filter { range.contains(it.date) }.joinToString("\r\n") { e -> listOf(e.date,e.time,when(e.type){INCOME->"收入";REFUND->"退款";else->"支出"},s.category(e.categoryId)?.name?:"未知",money(e.amount),e.note,e.refundOf?:"",s.assets.find{it.id==e.assetId}?.name?:"未关联",poolLabel(e.pool),if(e.inBudget)"是" else "否",if(e.repayment)"是" else "否",if(e.assetId!=null&&e.affectsBalance)"是" else "否").joinToString(",",transform=::cell) }
     }
 }
 object BackupFiles {

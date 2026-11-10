@@ -28,10 +28,11 @@ import kotlin.math.*
     var monthString by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
     val month=YearMonth.parse(monthString)
     var openBillId by rememberSaveable{mutableStateOf<String?>(null)}
-    val list=remember(s.entries,monthString) { s.live().filter{it.date.startsWith(monthString) && it.date<=LocalDate.now().toString()}.sortedWith(compareByDescending<Entry>{it.date}.thenByDescending{it.time}.thenByDescending{it.createdAt}) }
-    val t=remember(list){totals(list)};val budget=s.budget(monthString);val excluded=s.settings.budgetExcludedEntries;val budgetSpent=remember(list,excluded){budgetExpense(list,excluded)};val excludedCount=remember(list,excluded){s.excludedBudgetEntries(list).size}
+    val allEntries=remember(s.entries){s.live().filter{it.date<=LocalDate.now().toString()}.sortedWith(compareByDescending<Entry>{it.date}.thenByDescending{it.time}.thenByDescending{it.createdAt})}
+    val list=remember(allEntries,monthString){allEntries.filter{it.date.startsWith(monthString)}}
+    val t=remember(list){totals(list)};val budget=s.budget(monthString);val budgetSpent=remember(list){budgetExpense(list)};val excludedCount=remember(list){s.excludedBudgetEntries(list).size}
     var search by rememberSaveable{mutableStateOf(false)};var query by rememberSaveable{mutableStateOf("")};var count by rememberSaveable{mutableIntStateOf(100)}
-    val filtered=remember(list,query,s.categories,s.assets){if(query.isBlank())list else list.filter{(it.note+(s.category(it.categoryId)?.name?:"")+(s.assets.find{a->a.id==it.assetId}?.name?:"")).contains(query,true)}}
+    val filtered=remember(allEntries,list,query,s){if(query.isBlank())list else s.filterByQuery(allEntries,query)}
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(bottom=20.dp)) {
         item { Surface(color=MaterialTheme.colorScheme.primaryContainer,contentColor=MaterialTheme.colorScheme.onPrimaryContainer){Column(Modifier.fillMaxWidth().padding(horizontal=20.dp,vertical=10.dp),verticalArrangement=Arrangement.spacedBy(13.dp)){
             MonthPicker(month){monthString=it.toString();count=100}
@@ -47,14 +48,15 @@ import kotlin.math.*
             }
         }}}
         item{Row(Modifier.fillMaxWidth().padding(horizontal=20.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically){Text("本月账单",Modifier.weight(1f),fontWeight=FontWeight.Bold);IconButton(onClick={search=!search;if(!search)query=""}){Icon(Icons.Outlined.Search,"搜索账单")}}}
-        if(search)item{OutlinedTextField(query,{query=it;count=100;openBillId=null},Modifier.fillMaxWidth().padding(horizontal=20.dp),singleLine=true,label={Text("搜索备注、分类或资产")})}
-        if(filtered.isEmpty())item{EmptyState(if(query.isBlank())"这个月还没有记录" else "没有匹配的记录")}
+        if(search)item{Column(Modifier.padding(horizontal=20.dp)){OutlinedTextField(query,{query=it;count=100;openBillId=null},Modifier.fillMaxWidth(),singleLine=true,label={Text("搜索全部账本 · 备注 / 分类 / 资产")});Hint("范围包含全部月份，结果按日期倒序。",Modifier.padding(top=6.dp))}}
+        if(filtered.isEmpty())item{EmptyState(if(query.isBlank())"这个月还没有记录" else "全部账本都没有匹配的记录","换个关键词，或清空搜索回到本月。")}
         filtered.take(count).groupBy{it.date}.forEach{(date,dayEntries)->
-            item(key="day-"+date){val daily=totals(dayEntries);Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal=20.dp,vertical=9.dp),horizontalArrangement=Arrangement.SpaceBetween){Hint(date.substring(5).replace('-','月')+"日  "+listOf("一","二","三","四","五","六","日")[LocalDate.parse(date).dayOfWeek.value-1]);Hint("收入 "+money(daily.income)+"  支出 "+money(daily.expense))}}
+            item(key="day-"+date){val daily=totals(dayEntries);val weekday=listOf("一","二","三","四","五","六","日")[LocalDate.parse(date).dayOfWeek.value-1];Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(horizontal=20.dp,vertical=9.dp),horizontalArrangement=Arrangement.SpaceBetween){Hint(if(query.isBlank())date.substring(5).replace('-','月')+"日  "+weekday else date+"  "+weekday);Hint("收入 "+money(daily.income)+"  支出 "+money(daily.expense))}}
             items(dayEntries,key={it.id}){entry->SwipeBillRow(entry,s,openBillId==entry.id,{openBillId=if(it)entry.id else null},{onEntry(entry)},{openBillId=null;onNote(entry)},{openBillId=null;onDelete(entry)})}
         }
         if(filtered.size>count)item{TextButton(onClick={count+=100},modifier=Modifier.fillMaxWidth()){Text("加载更多 · 共"+filtered.size+"笔")}}
-        if(list.isNotEmpty())item{Hint("结余为本月收入减净支出；退款按发生日冲减支出。"+if(excludedCount>0)"预算不计入 $excludedCount 笔还款或已排除账单。" else "",Modifier.padding(20.dp))}
+        if(query.isNotBlank())item{Hint("已在全部账本中找到 ${filtered.size} 笔匹配记录。",Modifier.padding(20.dp))}
+        else if(list.isNotEmpty())item{Hint("结余为本月收入减净支出；退款按发生日冲减支出。"+if(excludedCount>0)"预算不计入 $excludedCount 笔还款或已排除账单。" else "",Modifier.padding(20.dp))}
     }
 }
 
@@ -83,7 +85,7 @@ import kotlin.math.*
             Hint("${range.start} 至 ${range.end}")
         } }
         item { Panel { ChoiceRow(listOf("支出分析","收入分析"),selectedType){selectedType=it;filterCategory=null};Hint(if(spending)"期间净支出" else "期间收入");MoneyText(selectedValue,size=34.sp);Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Column(Modifier.weight(1f)){Hint(if(spending)"日均净支出" else "日均收入");MoneyText(selectedValue/range.days,size=19.sp)};Column(Modifier.weight(1f)){Hint("与上一同期比较");Text(delta?.let{(if(it>0)"+" else "")+String.format(java.util.Locale.CHINA,"%.1f%%",it)}?:"无可比数据",fontSize=18.sp)}};Hint("对比：${previous.start} 至 ${previous.end}");if(t.refunds>0)Hint("支出 ¥${money(t.gross)} − 退款 ¥${money(t.refunds)}");Hint("期间结余 ¥${money(t.surplus)} · ${list.size}笔记录") } }
-        item { Panel { Heading(if(spending)"净支出趋势" else "收入趋势");TrendChart(list,range,spending);Hint("横轴：日期 · 纵轴：元；超过31天时按连续日期分组。") } }
+        item { Panel { Heading(if(spending)"净支出趋势" else "收入趋势");TrendChart(list,range,spending);Hint("横轴：日期 · 纵轴：元；柱高以峰值为上限，超过31天时按连续日期分组。") } }
         item { Heading("分类排行") }
         if(rank.isEmpty())item { EmptyState("这段时间没有${if(spending)"支出" else "收入"}","切换日期，或先记下一笔。") }
         items(rank,key={it.first}){(catId,value)->Panel(Modifier.clickable{filterCategory=if(filterCategory==catId)null else catId;count=100}){Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Text(s.category(catId)?.name?:"未知分类",fontWeight=FontWeight.Medium);Text("¥${money(value)}")};if(totalRank>0 && value>=0){Progress(value.toFloat()/totalRank);Hint(String.format(java.util.Locale.CHINA,"占比 %.1f%% · 点击查看明细",value.toDouble()/totalRank*100))}else Hint("包含跨期退款 · 点击查看明细")} }
@@ -98,22 +100,25 @@ import kotlin.math.*
     val bins=min(31L,range.days).toInt().coerceAtLeast(1);val bucket=ceil(range.days.toDouble()/bins).toLong()
     val values=List(bins){i->val start=range.start.plusDays(i*bucket);if(start>range.end)0L else {val end=minOf(start.plusDays(bucket-1),range.end);val t=totals(entries.filter{it.date>=start.toString()&&it.date<=end.toString()});if(spending)t.expense else t.income}}
     val high=max(1L,values.maxOrNull()?:0L).toFloat();val low=min(0L,values.minOrNull()?:0L).toFloat();val color=MaterialTheme.colorScheme.primary;val refund=MaterialTheme.colorScheme.error;val line=MaterialTheme.colorScheme.outlineVariant
-    Canvas(Modifier.fillMaxWidth().height(140.dp).semantics{contentDescription="${range.start}至${range.end}趋势，${values.size}组，最高${money(values.maxOrNull()?:0)}元"}){val h=size.height-14.dp.toPx();val zero=high/(high-low)*h;drawLine(line,Offset(0f,zero),Offset(size.width,zero));val step=size.width/values.size;values.forEachIndexed{i,v->val value=v.toFloat()/(high-low)*h;drawRect(if(v<0)refund else color,Offset(i*step+step*.18f,if(v>=0)zero-value else zero),androidx.compose.ui.geometry.Size(step*.64f,max(1f,abs(value))))}}
+    val peak=values.maxOrNull()?:0L;val trough=min(0L,values.minOrNull()?:0L)
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Hint("峰值 ¥"+money(peak));Hint(if(trough<0)"最低 ¥"+money(trough) else "零线 0")}
+    Canvas(Modifier.fillMaxWidth().height(140.dp).semantics{contentDescription="${range.start}至${range.end}趋势，${values.size}组，峰值${money(peak)}元，零线0元"}){val h=size.height-14.dp.toPx();val zero=high/(high-low)*h;drawLine(line,Offset(0f,zero),Offset(size.width,zero));drawLine(line.copy(alpha=.5f),Offset(0f,0f),Offset(size.width,0f));val step=size.width/values.size;values.forEachIndexed{i,v->val value=v.toFloat()/(high-low)*h;drawRect(if(v<0)refund else color,Offset(i*step+step*.18f,if(v>=0)zero-value else zero),androidx.compose.ui.geometry.Size(step*.64f,max(1f,abs(value))))}}
     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Hint(range.start.toString().substring(5));Hint(range.end.toString().substring(5))}
+    val active=values.count{it!=0L}
+    if(active<=1&&bins>1)Hint("期间仅 $active 组有记录，趋势参考意义有限。")
 }
 
 @Composable fun PlansScreen(s:Snapshot,onBudget:(YearMonth,String)->Unit,onGoal:(Goal?)->Unit,onProgress:(Goal,Boolean)->Unit,onHistory:(Goal)->Unit,onDelete:(Goal)->Unit,initialBudget:Boolean=false){
-    var segment by rememberSaveable{mutableIntStateOf(if(initialBudget)0 else 0)};var monthString by rememberSaveable{mutableStateOf(YearMonth.now().toString())};val month=YearMonth.parse(monthString)
+    var segment by rememberSaveable{mutableIntStateOf(if(initialBudget)0 else 1)};var monthString by rememberSaveable{mutableStateOf(YearMonth.now().toString())};val month=YearMonth.parse(monthString)
     val monthEntries=remember(s.entries,monthString){s.live().filter{it.date.startsWith(monthString)&&it.date<=LocalDate.now().toString()}}
-    val excluded=s.settings.budgetExcludedEntries
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp,5.dp,20.dp,100.dp),verticalArrangement=Arrangement.spacedBy(15.dp)){
         item{ChoiceRow(listOf("月度预算","攒钱目标"),segment){segment=it}}
         if(segment==0){
             item{MonthPicker(month){monthString=it.toString()}}
-            item{BudgetCard("本月总预算",s.budget(monthString),budgetExpense(monthEntries,excluded)){onBudget(month,"")}}
+            item{BudgetCard("本月总预算",s.budget(monthString),budgetExpense(monthEntries)){onBudget(month,"")}}
             item{Heading("分类预算","添加"){onBudget(month,"select")}}
             val scopes=s.budgets.filter{it.scope.isNotEmpty()&&(it.period==monthString || it.period=="*")}.map{it.scope}.distinct()
-            items(scopes,key={it}){scope->BudgetCard(s.category(scope)?.name?:"已归档分类",s.budget(monthString,scope),budgetExpense(monthEntries.filter{it.categoryId==scope},excluded)){onBudget(month,scope)}}
+            items(scopes,key={it}){scope->BudgetCard(s.category(scope)?.name?:"已归档分类",s.budget(monthString,scope),budgetExpense(monthEntries.filter{it.categoryId==scope})){onBudget(month,scope)}}
             if(scopes.isEmpty())item{Hint("可以为餐饮、购物等分类分别设定预算。分类预算不要求与总预算相等。")}
             item{Hint("达到80%时提示预算偏紧，达到100%时显示超支。设置默认预算后，未单独设置的月份自动沿用；可随时单独修改。记账时标记「还款」或关闭「计入预算」，该笔即不占用预算；可在预算设置里查看并恢复。")}
         }else{
@@ -126,16 +131,17 @@ import kotlin.math.*
 }
 @Composable private fun BudgetCard(title:String,budget:Budget?,spent:Long,onEdit:()->Unit){Panel{Heading(title,if(budget==null)"设置" else "调整",onEdit);if(budget==null){Hint("暂未设置预算") }else{val remaining=budget.limit-spent;MoneyText(if(remaining<0)-remaining else remaining,color=if(remaining<0)MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface);Hint(if(remaining<0)"已超支" else "剩余预算");Progress(spent.toFloat()/budget.limit,remaining<0);Hint("净支出 ¥${money(spent)} / 预算 ¥${money(budget.limit)}");if(spent>=budget.limit)Text("本月预算已用完",color=MaterialTheme.colorScheme.error)else if(spent>=budget.limit*.8)Hint("预算偏紧，已使用超过80%。")}}}
 
-@Composable fun SettingsScreen(s:Snapshot,onSettings:((Settings)->Settings)->Unit,onEnable:(Boolean)->Unit,onCategories:()->Unit,onExport:()->Unit,onImport:()->Unit,onRecovery:()->Unit,onPlans:()->Unit){
+@Composable fun SettingsScreen(s:Snapshot,onSettings:((Settings)->Settings)->Unit,onEnable:(Boolean)->Unit,onCategories:()->Unit,onExport:()->Unit,onImport:()->Unit,onRecovery:()->Unit,onPlans:()->Unit,onTrash:()->Unit){
     val context=LocalContext.current
     var repeatExpanded by rememberSaveable{mutableStateOf(false)}
     val settings=s.settings
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp,5.dp,20.dp,100.dp),verticalArrangement=Arrangement.spacedBy(15.dp)){
+        item{Panel{Heading("账本工具");OutlinedButton(onClick=onPlans,modifier=Modifier.fillMaxWidth()){Text("预算与攒钱目标")};OutlinedButton(onClick=onCategories,modifier=Modifier.fillMaxWidth()){Text("管理收支分类")};TextButton(onClick=onTrash,modifier=Modifier.fillMaxWidth()){Text("已删除账单")}}}
         item{Panel{
             Heading("每天一点点")
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
                 Column(Modifier.weight(1f)){Text("记账提醒");Hint(if(!settings.enabled)"按需开启，允许系统延迟" else if(!ReminderScheduler.allowed(context))"系统通知未开启，提醒暂不可用" else "${repeatSummary(settings.days)} · ${settings.time}")}
-                Switch(settings.enabled,onEnable)
+                Switch(settings.enabled,onEnable,modifier=Modifier.semantics{contentDescription="记账提醒开关"})
             }
             if(settings.enabled){
                 HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant.copy(alpha=.4f))
@@ -159,13 +165,12 @@ import kotlin.math.*
                     }
                 }
                 Hint(nextReminderText(settings))
-                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("今天记过就不提醒");Hint("减少打扰")};Switch(settings.skip,{value->onSettings{it.copy(skip=value)}})}
+                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("今天记过就不提醒");Hint("减少打扰")};Switch(settings.skip,{value->onSettings{it.copy(skip=value)}},modifier=Modifier.semantics{contentDescription="今天记过就不提醒"})}
                 Hint("系统省电、厂商限制或强制停止可能导致延迟或不送达。超过23:00不补发；再次打开会检查调度。")
                 TextButton(onClick={context.startActivity(Intent(SystemSettings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(SystemSettings.EXTRA_APP_PACKAGE,context.packageName))}){Text("系统通知设置")}
             }
         }}
         item{AppearancePicker(s.settings,onSettings)}
-        item{Panel{Heading("账本工具");OutlinedButton(onClick=onPlans,modifier=Modifier.fillMaxWidth()){Text("预算与攒钱目标")};OutlinedButton(onClick=onCategories,modifier=Modifier.fillMaxWidth()){Text("管理收支分类")}}}
         item{Panel{Heading("数据在自己手里");Hint("无需注册，账本保存在当前设备。卸载前请导出备份；恢复会替换当前账本，并保留恢复前快照。");Button(onClick=onExport,modifier=Modifier.fillMaxWidth()){Text("导出完整备份 · JSON")};OutlinedButton(onClick=onImport,modifier=Modifier.fillMaxWidth()){Text("从备份恢复")};TextButton(onClick=onRecovery,modifier=Modifier.fillMaxWidth()){Text("恢复上次导入前的本地快照")};Hint("备份包含收支和备注，请自行保管。恢复后提醒默认为关闭，需要重新开启。")}}
         item{Panel{Heading("关于轻记");Text("${BuildConfig.VERSION_NAME} · 本地记账");Hint("手动收支、资产、分析、预算、攒钱与备份均免费。无广告、无注册、无网络权限。分享安装包后，朋友会拥有自己的独立账本。");Hint("资产余额由你手动维护；记账只影响本地账本，不会实际扣款。云同步留待后续版本。")}}
     }

@@ -44,10 +44,15 @@ fun composeColor(value:Int)=Color(0xFF000000L or value.toLong())
 @Composable fun EmptyState(title: String="还没有记录", description: String="点击下方＋，记下第一笔收支。", action: String?=null,onAction:()->Unit={}) { Column(Modifier.fillMaxWidth().padding(vertical=30.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(10.dp)){Text("○",fontSize=34.sp,color=MaterialTheme.colorScheme.primary);Text(title,fontWeight=FontWeight.Medium);Hint(description);if(action!=null)TextButton(onClick=onAction){Text(action)}} }
 @Composable fun EntryRow(entry: Entry, snapshot: Snapshot, onClick:()->Unit) {
     val cat=snapshot.category(entry.categoryId)
-    val budgetTag=if(snapshot.isRepayment(entry))" · 还款" else if(entry.id in snapshot.settings.budgetExcludedEntries)" · 不计预算" else ""
-    Row(Modifier.fillMaxWidth().clickable(onClick=onClick).padding(vertical=13.dp).semantics { contentDescription="${entry.date} ${cat?.name} ${when(entry.type){INCOME->"收入";REFUND->"退款";else->"支出"}} ${money(entry.amount)}元 ${entry.note}$budgetTag" },verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+    val budgetTag=if(entry.repayment)" · 还款" else if(!entry.inBudget)" · 不计预算" else ""
+    val poolTag=if(normalizePool(entry.pool)==POOL_INVEST)" · 理财" else ""
+    Row(Modifier.fillMaxWidth().clickable(onClick=onClick).padding(vertical=13.dp).semantics { contentDescription="${entry.date} ${cat?.name} ${when(entry.type){INCOME->"收入";REFUND->"退款";else->"支出"}} ${money(entry.amount)}元 ${entry.note.take(60)}$poolTag$budgetTag" },verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
         CategoryBadge(cat?.name?:"其他")
-        Column(Modifier.weight(1f)){Text((cat?.name?:"已归档分类")+(if(entry.type==REFUND)" · 退款" else "")+budgetTag,style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.Medium);Hint("${entry.date.substring(5)} ${entry.time} · ${entry.note.ifBlank { "无备注" }}",Modifier.padding(top=3.dp));entry.assetId?.let{id->snapshot.assets.find{it.id==id}?.let{asset->Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)){AssetBadge(asset.kind,14.dp);Hint(asset.name+if(entry.affectsBalance)"" else " · 仅关联")}}}}
+        Column(Modifier.weight(1f)){
+            Text((cat?.name?:"已归档分类")+(if(entry.type==REFUND)" · 退款" else "")+poolTag+budgetTag,style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.Medium,maxLines=1,overflow=TextOverflow.Ellipsis)
+            Text("${entry.date.substring(5)} ${entry.time} · ${entry.note.ifBlank { "无备注" }}",modifier=Modifier.padding(top=3.dp),color=MaterialTheme.colorScheme.onSurfaceVariant,style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+            entry.assetId?.let{id->snapshot.assets.find{it.id==id}?.let{asset->Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(4.dp)){AssetBadge(asset.kind,14.dp);Text(asset.name+if(entry.affectsBalance)"" else " · 仅关联",color=MaterialTheme.colorScheme.onSurfaceVariant,style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis)}}}
+        }
         Text((if(entry.type==EXPENSE)"−" else "+")+money(entry.amount),fontFamily=FontFamily.SansSerif,fontSize=18.sp,color=if(entry.type==INCOME || entry.type==REFUND)MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,modifier=Modifier.widthIn(max=150.dp))
     }
     HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant.copy(alpha=.4f))

@@ -10,6 +10,8 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -34,25 +36,43 @@ import java.time.*
     var catId by rememberSaveable(entry?.id){mutableStateOf(entry?.categoryId?:s.categories.filter{it.type==EXPENSE&&!it.archived}.minByOrNull{it.sortOrder}?.id?:"")}
     var assetId by rememberSaveable(entry?.id){mutableStateOf(if(entry!=null)entry.assetId else s.defaultAssetId())}
     var affectsBalance by rememberSaveable(entry?.id){mutableStateOf(entry?.affectsBalance?:true)}
+    val initialPool=entry?.let{normalizePool(it.pool)}?:s.assets.find{it.id==s.defaultAssetId()}?.let{normalizePool(it.pool)}?:POOL_LIQUID
+    var pool by rememberSaveable(entry?.id,key="pool-${entry?.id}"){mutableStateOf(initialPool)}
     var date by rememberSaveable(entry?.id){mutableStateOf(entry?.date?:LocalDate.now().toString())}
     var time by rememberSaveable(entry?.id){mutableStateOf(entry?.time?:LocalTime.now().withSecond(0).withNano(0).toString())}
     var note by rememberSaveable(entry?.id){mutableStateOf(entry?.note?:"")}
     var continueAdding by rememberSaveable{mutableStateOf(false)}
-    var inBudget by rememberSaveable(entry?.id,key="inBudget-${entry?.id}"){mutableStateOf(entry?.let{it.id !in s.settings.budgetExcludedEntries}?:true)}
-    var repayment by rememberSaveable(entry?.id,key="repayment-${entry?.id}"){mutableStateOf(entry?.let{it.id in s.settings.repaymentEntries}?:false)}
+    var inBudget by rememberSaveable(entry?.id,key="inBudget-${entry?.id}"){mutableStateOf(entry?.inBudget?:true)}
+    var repayment by rememberSaveable(entry?.id,key="repayment-${entry?.id}"){mutableStateOf(entry?.repayment?:false)}
     val original=entry?.refundOf?.let{id->s.entries.find{it.id==id}}
+    val effectivePool=if(type==REFUND)original?.let{normalizePool(it.pool)}?:pool else pool
     val usage=remember(s.entries){s.live().groupingBy{it.categoryId}.eachCount()}
     val categories=s.categories.filter{(it.type==if(type==INCOME)INCOME else EXPENSE) && (!it.archived||it.id==catId)}.sortedWith(compareByDescending<Category>{usage[it.id]?:0}.thenBy{it.sortOrder})
     var more by rememberSaveable(entry?.id){mutableStateOf(false)}
     val parsed=keypadMoney(amount)
     val after=if(assetId!=null&&parsed!=null&&affectsBalance){val changed=(entry?:Entry(type=type,amount=parsed,categoryId=catId)).copy(type=type,amount=parsed,assetId=assetId,affectsBalance=true);s.projectedBalance(assetId!!,entry?.takeIf{old->s.entries.any{it.id==old.id}},changed)}else null
+    val linkedDebt=assetId?.let{id->s.assets.find{it.id==id}?.let{isDebtKind(it.kind)}}?:false
     FastInputSheet(if(type==REFUND)"退款" else if(entry!=null)"编辑账单" else "记一笔",onDismiss,form={
-        if(type!=REFUND)ChoiceRow(listOf("支出","收入"),if(type==INCOME)1 else 0){i->type=if(i==1)INCOME else EXPENSE;catId=s.categories.firstOrNull{it.type==type&&!it.archived}?.id?:""}
-        else Row(verticalAlignment=Alignment.CenterVertically){Text(s.category(catId)?.name?:"原分类",Modifier.weight(1f));InfoHint("退款","关联原支出，按退款发生日冲减支出。"+(original?.let{"原支出 ¥"+money(it.amount)}?:""))}
+        if(type!=REFUND){
+            ChoiceRow(listOf("支出","收入"),if(type==INCOME)1 else 0){i->type=if(i==1)INCOME else EXPENSE;catId=s.categories.firstOrNull{it.type==type&&!it.archived}?.id?:""}
+            ChoiceRow(listOf("流动账单","理财账单"),if(pool==POOL_INVEST)1 else 0){i->
+                val next=if(i==1)POOL_INVEST else POOL_LIQUID
+                if(next!=pool){
+                    pool=next
+                    val stillValid=assetId?.let{id->s.assets.find{it.id==id}?.let{normalizePool(it.pool)==next}}?:true
+                    if(!stillValid)assetId=s.assets.firstOrNull{!it.archived&&normalizePool(it.pool)==next}?.id
+                }
+            }
+            Hint(if(pool==POOL_INVEST)"理财账单只关联理财资金账户，余额变动计入理财资金。" else "流动账单只关联流动资金账户，余额变动计入流动资金。")
+        }
+        else Row(verticalAlignment=Alignment.CenterVertically){Text(s.category(catId)?.name?:"原分类",Modifier.weight(1f));InfoHint("退款","关联原支出，按退款发生日冲减支出。资金类型跟随原支出："+poolLabel(effectivePool)+(original?.let{"；原支出 ¥"+money(it.amount)}?:""))}
         AmountDisplay(amount){amount=""}
         if(type!=REFUND)CategoryGrid(categories,catId){catId=it}
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically){
-            Box(Modifier.weight(1.2f)){CompactAssetChoice(if(type==EXPENSE)"付款账户" else "到账账户",s,assetId,{assetId=it})}
+            Box(Modifier.weight(1.2f)){CompactAssetChoice(if(type==EXPENSE)"付款账户" else "到账账户",s,assetId,onSelect={id->
+                assetId=id
+                if(type!=REFUND)id?.let{chosen->s.assets.find{it.id==chosen}?.let{pool=normalizePool(it.pool)}}
+            },pool=effectivePool)}
             OutlinedButton(onClick={pickDate(context,LocalDate.parse(date)){date=it.toString()}},modifier=Modifier.weight(1f)){Icon(Icons.Outlined.CalendarToday,null,Modifier.size(16.dp));Spacer(Modifier.width(5.dp));Text(if(date==LocalDate.now().toString())"今天" else date.substring(5),maxLines=1)}
         }
         if(type==EXPENSE)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)){
@@ -60,7 +80,7 @@ import java.time.*
             InfoHint("预算口径","还信用卡、还花呗等属于还款，默认不计入预算，避免与消费当期的支出重复计算。也可以只关闭右侧开关，用于报销、代付等非日常消费。账单仍计入本月收支与资产余额。")
             Spacer(Modifier.weight(1f))
             Text("计入预算",style=MaterialTheme.typography.labelMedium)
-            Switch(inBudget,{value->inBudget=value;if(value)repayment=false})
+            Switch(inBudget,{value->inBudget=value;if(value)repayment=false},modifier=Modifier.semantics{contentDescription="本笔计入预算"})
         }
         if(type==EXPENSE&&(!inBudget||repayment))Hint(if(repayment)"还款不计入预算，收支统计与资产余额不受影响。" else "本笔不计入预算，收支统计与资产余额不受影响。")
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
@@ -68,9 +88,9 @@ import java.time.*
             if(assetId!=null&&!affectsBalance)Text("仅关联",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick={more=!more}){Text("更多");Icon(if(more)Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,null,Modifier.size(17.dp))}
         }
-        if(after!=null&&after<0)Text("余额不足 · 保存后 ¥"+money(after),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.error)
+        if(after!=null&&after<0)Text(if(linkedDebt)"保存后欠款 ¥"+money(kotlin.math.abs(after)) else "余额不足 · 保存后 ¥"+money(after),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.error)
         if(more){
-            if(assetId!=null){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("同步余额",Modifier.weight(1f));InfoHint("同步余额","旧账若已包含在当前余额中，请保持关闭，避免重复扣减。关闭时仅关联账户。新记账默认开启。");Switch(affectsBalance,{affectsBalance=it})};if(after!=null&&after>=0)Hint("保存后余额 ¥"+money(after))}
+            if(assetId!=null){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("同步余额",Modifier.weight(1f));InfoHint("同步余额","旧账若已包含在当前余额中，请保持关闭，避免重复扣减。关闭时仅关联账户。新记账默认开启。");Switch(affectsBalance,{affectsBalance=it})};if(after!=null&&after>=0)Hint(if(linkedDebt)"保存后已结清 · 溢缴 ¥"+money(after) else "保存后余额 ¥"+money(after))}
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){TextButton(onClick={pickTime(context,time){time=it}}){Icon(Icons.Outlined.Schedule,null,Modifier.size(17.dp));Spacer(Modifier.width(6.dp));Text(time)};Spacer(Modifier.weight(1f));if(entry==null){Text("连续记账",style=MaterialTheme.typography.labelMedium);Switch(continueAdding,{continueAdding=it})}}
             if(entry!=null&&s.entries.any{it.id==entry.id}){
                 if(entry.type==EXPENSE){val refunded=s.live().filter{it.refundOf==entry.id}.sumOf{it.amount};TextButton(onClick={onRefund(entry)},enabled=refunded<entry.amount){Text(if(refunded==0L)"退款" else "继续退款 · 已退 ¥"+money(refunded))}}
@@ -80,9 +100,12 @@ import java.time.*
         AmountKeypad{key->amount=keypadInput(amount,key)}
         SubmitButton(enabled=parsed!=null,done={vm.notify("已保存");if(continueAdding&&entry==null){amount="";note="";repayment=false;inBudget=true}else onDismiss()}){
             val value=requireNotNull(keypadMoney(amount)){"请输入有效金额"};require(catId.isNotBlank()){"请先添加分类"}
-            val result=(entry?:Entry(type=type,amount=value,categoryId=catId)).copy(type=type,amount=value,categoryId=catId,date=date,time=time,note=note,assetId=assetId,affectsBalance=assetId!=null&&affectsBalance)
+            val result=(entry?:Entry(type=type,amount=value,categoryId=catId)).copy(
+                type=type,amount=value,categoryId=catId,date=date,time=time,note=note,
+                assetId=assetId,affectsBalance=assetId!=null&&affectsBalance,
+                pool=effectivePool,inBudget=if(type==EXPENSE)inBudget else true,repayment=type==EXPENSE&&repayment
+            )
             vm.repo.save(result)
-            vm.repo.setEntryBudgetFlags(result.id,if(type==EXPENSE)inBudget else true,type==EXPENSE&&repayment)
         }
     })
 }
@@ -90,7 +113,7 @@ import java.time.*
 @Composable fun BudgetEditor(month:YearMonth,scopeId:String,s:Snapshot,vm:LedgerViewModel,onDismiss:()->Unit){
     var scope by rememberSaveable{mutableStateOf(if(scopeId=="select")s.categories.firstOrNull{it.type==EXPENSE&&!it.archived}?.id?:"" else scopeId)}
     var amount by rememberSaveable{mutableStateOf(s.budget(month.toString(),scope)?.let{money(it.limit)}?:"")};var asDefault by rememberSaveable{mutableStateOf(false)}
-    val excluded=remember(s.entries,s.settings,month){s.excludedBudgetEntries(s.live().filter{it.date.startsWith(month.toString())})}
+    val excluded=remember(s.entries,month){s.excludedBudgetEntries(s.live().filter{it.date.startsWith(month.toString())})}
     EditorSheet("${month.monthValue}月预算",onDismiss){
         if(scopeId=="select")FlowRow(horizontalArrangement=Arrangement.spacedBy(7.dp)){s.categories.filter{it.type==EXPENSE&&!it.archived}.forEach{c->FilterChip(c.id==scope,onClick={scope=c.id;amount=s.budget(month.toString(),scope)?.let{money(it.limit)}?:""},label={Text(c.name)})}}
         else Hint(if(scope.isEmpty())"总预算" else s.category(scope)?.name?:"分类预算")
@@ -152,5 +175,25 @@ import java.time.*
         s.categories.filter{it.type==if(type==0)EXPENSE else INCOME}.forEach{c->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){TextButton(onClick={editing=c;name=c.name;new=false},modifier=Modifier.weight(1f)){Text("${c.icon} ${c.name}${if(c.archived)"（已归档）" else ""}")};TextButton(onClick={vm.action(if(c.archived)"分类已恢复" else "分类已归档"){vm.repo.saveCategory(c.copy(archived=!c.archived))}}){Text(if(c.archived)"恢复" else "归档")}}}
         OutlinedButton(onClick={editing=null;new=true;name=""},modifier=Modifier.fillMaxWidth()){Text("＋ 新建分类")}
         if(new||editing!=null){OutlinedTextField(name,{if(it.length<=20)name=it},Modifier.fillMaxWidth(),label={Text("分类名称（最多20字）")},singleLine=true);SubmitButton(done={editing=null;new=false;name="";vm.notify("分类已保存")}){vm.repo.saveCategory(editing?.copy(name=name.trim())?:Category(name=name.trim(),type=if(type==0)EXPENSE else INCOME,sortOrder=s.categories.size))}}
+    }
+}
+@Composable fun TrashSheet(s:Snapshot,vm:LedgerViewModel,onDismiss:()->Unit){
+    val deleted=remember(s.entries){s.entries.filter{it.deletedAt!=null}.sortedByDescending{it.deletedAt?:0L}}
+    EditorSheet("已删除账单",onDismiss){
+        Hint("删除的账单会保留在这里，可随时恢复。恢复退款单时，若原支出也被删除会一并恢复；已归档账户关联的账单无法恢复。")
+        if(deleted.isEmpty())EmptyState("还没有删除的账单","删除账单后会显示在这里。")
+        else{
+            Hint("共 ${deleted.size} 笔 · 按删除时间倒序")
+            deleted.take(50).forEach{e->Panel{
+                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                    Column(Modifier.weight(1f)){
+                        Text("${s.category(e.categoryId)?.name?:"其他"}  ¥${money(e.amount)}"+(if(e.type==REFUND)" · 退款" else if(e.type==INCOME)" · 收入" else ""),maxLines=1)
+                        Hint("${e.date} ${e.time} · ${e.note.take(30).ifBlank{"无备注"}}")
+                    }
+                    TextButton(onClick={vm.action("账单已恢复"){vm.repo.restoreDeleted(e.id)}}){Text("恢复")}
+                }
+            }}
+            if(deleted.size>50)Hint("仅显示最近 50 笔。")
+        }
     }
 }

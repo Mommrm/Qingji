@@ -32,7 +32,9 @@ class MainActivity : ComponentActivity() {
 }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun LedgerRoot(newEntrySignal:Int,vm:LedgerViewModel=viewModel()){
-    val s by vm.state.collectAsStateWithLifecycle();val context=LocalContext.current;val scope=rememberCoroutineScope();val snack=remember{SnackbarHostState()}
+    val s by vm.state.collectAsStateWithLifecycle();val context=LocalContext.current;val snack=remember{SnackbarHostState()}
+    val pendingRestore by vm.pendingRestore.collectAsStateWithLifecycle();val restoreBusy by vm.restoreBusy.collectAsStateWithLifecycle()
+    val restoreIsRecovery by vm.restoreIsRecovery.collectAsStateWithLifecycle();val restoreError by vm.restoreError.collectAsStateWithLifecycle()
     var page by rememberSaveable{mutableIntStateOf(0)};var editor by rememberSaveable{mutableStateOf<String?>(null)}
     var noteEntryId by rememberSaveable{mutableStateOf<String?>(null)}
     var selectedEntryId by rememberSaveable{mutableStateOf<String?>(null)};var refundOriginalId by rememberSaveable{mutableStateOf<String?>(null)};var refundDraftId by rememberSaveable{mutableStateOf(newId())}
@@ -42,7 +44,6 @@ class MainActivity : ComponentActivity() {
     val budgetMonth=YearMonth.parse(budgetMonthString)
     val editingGoal=s.goals.find{it.id==selectedGoalId}
     val editingEntry=remember(s.entries,s.assets,selectedEntryId,refundOriginalId,refundDraftId){val original=s.entries.find{it.id==refundOriginalId};if(original!=null)Entry(id=refundDraftId,type=REFUND,amount=original.amount-s.live().filter{it.refundOf==original.id}.sumOf{it.amount},categoryId=original.categoryId,refundOf=original.id,assetId=original.assetId?.takeIf{id->s.assets.any{it.id==id&&!it.archived}}?:s.defaultAssetId(),affectsBalance=true)else s.entries.find{it.id==selectedEntryId}}
-    var pendingRestore by remember{mutableStateOf<Snapshot?>(null)};var restoreBusy by remember{mutableStateOf(false)};var restoreIsRecovery by remember{mutableStateOf(false)};var restoreError by remember{mutableStateOf<String?>(null)}
     var csvStart by rememberSaveable{mutableStateOf(LocalDate.now().withDayOfMonth(1).toString())};var csvEnd by rememberSaveable{mutableStateOf(LocalDate.now().toString())}
     val csvRange=DateRange(LocalDate.parse(csvStart),LocalDate.parse(csvEnd))
     var deleteGoal by remember{mutableStateOf<Goal?>(null)}
@@ -51,13 +52,13 @@ class MainActivity : ComponentActivity() {
     val enablePermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()){granted->if(granted)vm.updateSettings{it.copy(enabled=true)}else vm.notify("未开启通知权限，记账与分析仍可使用")}
     val exportBackup=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->if(uri!=null)vm.action("完整备份已保存"){BackupFiles.write(context,uri,BackupCodec.encode(vm.repo.snapshot()))}}
     val exportCsv=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")){uri->if(uri!=null)vm.action("CSV 已导出"){BackupFiles.write(context,uri,BackupCodec.csv(vm.repo.snapshot(),csvRange))}}
-    val importBackup=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null)vm.action{val decoded=BackupFiles.read(context,uri);withContext(Dispatchers.Main){pendingRestore=decoded;restoreIsRecovery=false;restoreError=null}}}
+    val importBackup=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null)vm.action{val decoded=try{BackupFiles.read(context,uri)}catch(e:Exception){if(e is CancellationException)throw e;throw IllegalArgumentException("备份文件无效或已损坏："+(e.message?:"请检查文件内容"))};vm.proposeRestore(decoded,false)}}
     LedgerTheme(s.settings.theme,s.settings.accent){
         val addEntry={selectedEntryId=null;refundOriginalId=null;editor="entry"}
         Scaffold(containerColor=MaterialTheme.colorScheme.background,snackbarHost={SnackbarHost(snack)},topBar={
             Surface(color=if(page==0)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,contentColor=if(page==0)MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface){Row(Modifier.statusBarsPadding().fillMaxWidth().height(56.dp).padding(horizontal=20.dp),verticalAlignment=Alignment.CenterVertically){
                 if(page==3)IconButton(onClick={page=4}){Icon(Icons.Outlined.ArrowBack,"返回我的")}
-                Text(listOf("轻记","收支图表","我的资产","预算与攒钱","我的")[page],Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                Text(listOf("轻记","收支图表","资产与负债","预算与攒钱","我的")[page],Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
                 if(page==0)Text("认真生活，轻松记账",style=MaterialTheme.typography.labelSmall)
             }}
         },bottomBar={NavigationBar(containerColor=MaterialTheme.colorScheme.surface){
@@ -68,8 +69,8 @@ class MainActivity : ComponentActivity() {
                 0->HomeScreen(s,{selectedEntryId=it.id;refundOriginalId=null;editor="entry"},{month->budgetMonthString=month.toString();budgetScope="";editor="budget"},{page=2},{vm.delete(it)},{noteEntryId=it.id})
                 1->AnalysisScreen(s,{selectedEntryId=it.id;refundOriginalId=null;editor="entry"}){range->csvStart=range.start.toString();csvEnd=range.end.toString();exportCsv.launch("轻记-收支-${range.start}-${range.end}.csv")}
                 2->AssetsScreen(s,{selectedAssetId=null;editor="asset_edit"},{asset->selectedAssetId=asset.id;editor="asset_details"},{selectedTransferId=null;preferredTransferSource=null;editor="transfer"})
-                3->PlansScreen(s,{month,category->budgetMonthString=month.toString();budgetScope=category;editor="budget"},{goal->selectedGoalId=goal?.id;editor="goal"},{goal,isDeposit->selectedGoalId=goal.id;deposit=isDeposit;editor="progress"},{goal->selectedGoalId=goal.id;editor="history"},{goal->deleteGoal=goal})
-                4->SettingsScreen(s,vm::updateSettings,{enable->if(!enable)vm.updateSettings{it.copy(enabled=false)}else if(Build.VERSION.SDK_INT>=33&&!ReminderScheduler.allowed(context))enablePermission.launch(Manifest.permission.POST_NOTIFICATIONS)else vm.updateSettings{it.copy(enabled=true)}},{editor="categories"},{exportBackup.launch("轻记-完整备份-${LocalDate.now()}.json")},{importBackup.launch(arrayOf("application/json","text/plain","application/octet-stream"))},{vm.action{val decoded=BackupFiles.readRecovery(context);withContext(Dispatchers.Main){pendingRestore=decoded;restoreIsRecovery=true;restoreError=null}}},{page=3})
+                3->PlansScreen(s,{month,category->budgetMonthString=month.toString();budgetScope=category;editor="budget"},{goal->selectedGoalId=goal?.id;editor="goal"},{goal,isDeposit->selectedGoalId=goal.id;deposit=isDeposit;editor="progress"},{goal->selectedGoalId=goal.id;editor="history"},{goal->deleteGoal=goal},initialBudget=true)
+                4->SettingsScreen(s,vm::updateSettings,{enable->if(!enable)vm.updateSettings{it.copy(enabled=false)}else if(Build.VERSION.SDK_INT>=33&&!ReminderScheduler.allowed(context))enablePermission.launch(Manifest.permission.POST_NOTIFICATIONS)else vm.updateSettings{it.copy(enabled=true)}},{editor="categories"},{exportBackup.launch("轻记-完整备份-${LocalDate.now()}.json")},{importBackup.launch(arrayOf("application/json","text/plain","application/octet-stream"))},{vm.action{val decoded=BackupFiles.readRecovery(context);vm.proposeRestore(decoded,true)}},{page=3},{editor="trash"})
             }
         }}
         val dismiss={editor=null}
@@ -80,13 +81,14 @@ class MainActivity : ComponentActivity() {
             "progress"->editingGoal?.let{ProgressEditor(it,deposit,s,vm,dismiss)}
             "history"->editingGoal?.let{GoalHistory(it,s,dismiss)}
             "categories"->CategoryManager(s,vm,dismiss)
+            "trash"->TrashSheet(s,vm,dismiss)
             "asset_edit"->AssetEditor(editingAsset,s,vm,dismiss)
             "asset_calibrate"->editingAsset?.let{CalibrationEditor(it,s,vm,dismiss)}
             "transfer"->TransferEditor(editingTransfer,preferredTransferSource,s,vm,dismiss)
-            "asset_details"->editingAsset?.let{asset->AssetDetails(asset,s,vm,dismiss,{editor="asset_edit"},{editor="asset_calibrate"},{selectedTransferId=null;preferredTransferSource=asset.id;editor="transfer"},{entry->selectedEntryId=entry.id;refundOriginalId=null;editor="entry"},{transfer->selectedTransferId=transfer.id;editor="transfer"})}
+            "asset_details"->editingAsset?.let{asset->AssetDetails(asset,s,vm,dismiss,{editor="asset_edit"},{editor="asset_calibrate"},{source->selectedTransferId=null;preferredTransferSource=source;editor="transfer"},{entry->selectedEntryId=entry.id;refundOriginalId=null;editor="entry"},{transfer->selectedTransferId=transfer.id;editor="transfer"})}
         }
         noteEntryId?.let{id->s.live().find{it.id==id}?.let{EntryNoteDialog(it,vm){noteEntryId=null}}}
-        pendingRestore?.let{backup->AlertDialog(onDismissRequest={if(!restoreBusy)pendingRestore=null},title={Text(if(restoreIsRecovery)"恢复导入前快照？" else "确认恢复备份？")},text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){Text("备份包含：\n${backup.entries.count{it.deletedAt==null}}笔收支\n${backup.assets.size}个资产账户\n${backup.transfers.count{it.deletedAt==null}}笔转账\n${backup.categories.size}个分类\n${backup.goals.size}个攒钱目标\n${backup.budgets.size}项预算");Text("恢复将替换当前账本与资产。会先保存当前数据快照；恢复后提醒默认关闭。重复恢复同一文件不会重复入账。");if(backup.assets.isEmpty())Hint("此备份不含资产账户；恢复后旧账不会关联或扣减资产。");restoreError?.let{Text(it,color=MaterialTheme.colorScheme.error)}}},confirmButton={TextButton(enabled=!restoreBusy,onClick={restoreBusy=true;restoreError=null;scope.launch{try{withContext(Dispatchers.IO){val before=vm.repo.snapshot();BackupFiles.recovery(context,before);vm.repo.restore(backup);ReminderScheduler.schedule(context,vm.repo.settings.flow.first())};pendingRestore=null;vm.notify("备份已恢复，提醒默认关闭")}catch(e:Exception){if(e is CancellationException)throw e;restoreError=e.message?:"恢复失败，原数据已保留"}finally{restoreBusy=false}}}){Text(if(restoreBusy)"正在恢复…" else "确认替换")}},dismissButton={TextButton(enabled=!restoreBusy,onClick={pendingRestore=null}){Text("取消")}})}
+        pendingRestore?.let{backup->AlertDialog(onDismissRequest={vm.cancelRestore()},title={Text(if(restoreIsRecovery)"恢复导入前快照？" else "确认恢复备份？")},text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){Text("备份包含：\n${backup.entries.count{it.deletedAt==null}}笔收支\n${backup.assets.size}个账户\n${backup.transfers.count{it.deletedAt==null}}笔转账\n${backup.categories.size}个分类\n${backup.goals.size}个攒钱目标\n${backup.budgets.size}项预算");Text("恢复将替换当前账本与资产。会先保存当前数据快照；恢复后提醒默认关闭。重复恢复同一文件不会重复入账。");if(backup.assets.isEmpty())Hint("此备份不含资产账户；恢复后旧账不会关联或扣减资产。");restoreError?.let{Text(it,color=MaterialTheme.colorScheme.error)}}},confirmButton={TextButton(enabled=!restoreBusy,onClick={vm.performRestore()}){Text(if(restoreBusy)"正在恢复…" else "确认替换")}},dismissButton={TextButton(enabled=!restoreBusy,onClick={vm.cancelRestore()}){Text("取消")}})}
         deleteGoal?.let{goal->AlertDialog(onDismissRequest={deleteGoal=null},title={Text("删除这个攒钱目标？")},text={Text("将同时删除“${goal.title}”的进度历史。删除后可在短时提示中撤销。")},confirmButton={TextButton(onClick={vm.removeGoal(goal);deleteGoal=null}){Text("删除",color=MaterialTheme.colorScheme.error)}},dismissButton={TextButton(onClick={deleteGoal=null}){Text("取消")}})}
     }
 }

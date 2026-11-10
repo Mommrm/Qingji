@@ -24,8 +24,10 @@ class SettingsStore(private val context: Context) {
     private val skip = booleanPreferencesKey("skip")
     private val revision = longPreferencesKey("reminderRevision")
     private val sent = stringPreferencesKey("lastSentDate")
+    // v2 遗留键：仅用于一次性搬运到 Room，之后不再写入业务口径
     private val budgetExcludedEntries = stringSetPreferencesKey("budgetExcludedEntries")
     private val repaymentEntries = stringSetPreferencesKey("repaymentEntries")
+    private val v3Migrated = booleanPreferencesKey("v3BudgetFlagsMigrated")
     val flow: Flow<Settings> = context.settingsStore.data.map { p -> Settings(
         theme = p[theme] ?: "SYSTEM",
         enabled = p[enabled] ?: false,
@@ -34,12 +36,23 @@ class SettingsStore(private val context: Context) {
         skip = p[skip] ?: true,
         reminderRevision = p[revision] ?: 1L,
         lastSentDate = p[sent] ?: "",
-        accent = normalizeAccent(p[accent]?:"SUN"),
-        budgetExcludedEntries = p[budgetExcludedEntries] ?: emptySet(),
-        repaymentEntries = p[repaymentEntries] ?: emptySet()
+        accent = normalizeAccent(p[accent]?:"SUN")
     ) }
-    suspend fun set(settings: Settings) { context.settingsStore.edit { p -> p[theme] = settings.theme; p[accent]=normalizeAccent(settings.accent);p[enabled] = settings.enabled; p[time] = settings.time; p[days] = settings.days.map { it.toString() }.toSet(); p[skip] = settings.skip; p[revision] = settings.reminderRevision; p[sent] = settings.lastSentDate; p[budgetExcludedEntries] = settings.budgetExcludedEntries; p[repaymentEntries] = settings.repaymentEntries } }
+    suspend fun set(settings: Settings) { context.settingsStore.edit { p -> p[theme] = settings.theme; p[accent]=normalizeAccent(settings.accent);p[enabled] = settings.enabled; p[time] = settings.time; p[days] = settings.days.map { it.toString() }.toSet(); p[skip] = settings.skip; p[revision] = settings.reminderRevision; p[sent] = settings.lastSentDate } }
     suspend fun update(transform: (Settings) -> Settings) { updateMutex.withLock { set(transform(flow.first())) } }
+    /** 恢复备份与常规偏好更新共用同一把锁，避免并发互相覆盖。 */
+    suspend fun <T> exclusive(block: suspend () -> T): T = updateMutex.withLock { block() }
+    /** v2→v3 一次性搬运：读旧偏好标记，写完 Room 后清键并打标，保证只跑一次。 */
+    suspend fun v3MigrationNeeded(): Boolean = context.settingsStore.data.first()[v3Migrated] != true
+    suspend fun legacyBudgetFlags(): Pair<Set<String>, Set<String>> {
+        val p = context.settingsStore.data.first()
+        return (p[budgetExcludedEntries] ?: emptySet()) to (p[repaymentEntries] ?: emptySet())
+    }
+    suspend fun finishV3Migration() { context.settingsStore.edit { p ->
+        p[v3Migrated] = true
+        p.remove(budgetExcludedEntries)
+        p.remove(repaymentEntries)
+    } }
 }
 
 class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.create(context)) {
@@ -47,7 +60,34 @@ class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.c
     val settings = SettingsStore(context)
     private val assetData=combine(dao.observeAssets(),dao.observeTransfers(),dao.observeAdjustments()){a,t,adjustments->AssetData(a,t,adjustments)}
     val snapshots: Flow<Snapshot> = combine(dao.observeEntries(), dao.observeCategories(), dao.observeBudgets(), dao.observeGoals(), dao.observeEvents()) { e, c, b, g, events -> Snapshot(e, c, b, g, events, ready = c.isNotEmpty()) }.combine(settings.flow) { s, p -> s.copy(settings = p) }.combine(assetData){s,a->s.copy(assets=a.accounts,transfers=a.transfers,adjustments=a.adjustments)}.flowOn(Dispatchers.Default)
-    suspend fun initialize() { db.withTransaction { if (dao.categories().isEmpty()) dao.putCategories(defaultCategories()) } }
+    suspend fun initialize() {
+        db.withTransaction { if (dao.categories().isEmpty()) dao.putCategories(defaultCategories()) }
+        migrateV3Flags()
+        normalizeLegacyDebtBalances()
+    }
+    /** 旧版键盘没有负号，负债类账户可能被建成正期初。按「欠款」翻负；条件本身幂等，无需打标。 */
+    private suspend fun normalizeLegacyDebtBalances() = db.withTransaction {
+        dao.assets().filter { isDebtKind(it.kind) && it.openingBalance > 0 }.forEach {
+            dao.putAsset(it.copy(openingBalance = -it.openingBalance, updatedAt = System.currentTimeMillis()))
+        }
+    }
+    /** 旧版把预算标记放在 DataStore。升级到 v3 后搬进 Room 的 entries 表，与账单本身同库同事务。 */
+    private suspend fun migrateV3Flags() {
+        if (!settings.v3MigrationNeeded()) return
+        val (excluded, repayments) = settings.legacyBudgetFlags()
+        val assetPools = dao.assets().associate { it.id to it.pool }
+        db.withTransaction {
+            val all = dao.entries()
+            if (all.isNotEmpty()) dao.putEntries(all.map { e ->
+                e.copy(
+                    pool = normalizePool(e.assetId?.let { assetPools[it] } ?: POOL_LIQUID),
+                    inBudget = e.id !in excluded,
+                    repayment = e.id in repayments
+                )
+            })
+        }
+        settings.finishV3Migration()
+    }
     suspend fun snapshot(): Snapshot = db.withTransaction { Snapshot(dao.entries(), dao.categories(), dao.budgets(), dao.goals(), dao.events(), settings.flow.first(), true,dao.assets(),dao.transfers(),dao.adjustments()) }
     suspend fun save(entry: Entry) = db.withTransaction {
         require(entry.type in listOf(EXPENSE, INCOME, REFUND)) { "记录类型无效" }
@@ -59,7 +99,10 @@ class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.c
         val cat = requireNotNull(dao.category(entry.categoryId)) { "分类不存在" }
         require(cat.type == if (entry.type == INCOME) INCOME else EXPENSE) { "分类类型不匹配" }
         val existing = dao.entry(entry.id)
-        entry.assetId?.let{require(dao.asset(it)!=null){"所选资产不存在"}}
+        entry.assetId?.let{id->
+            val asset=requireNotNull(dao.asset(id)){"所选资产不存在"}
+            require(normalizePool(entry.pool)==normalizePool(asset.pool)){"账单资金类型与所选账户不一致，请重新选择账户"}
+        }
         validateAssetEffects(effectMap(existing),effectMap(entry))
         if (existing?.type == EXPENSE && dao.refunded(entry.id) > 0) {
             require(entry.type == EXPENSE && entry.amount >= dao.refunded(entry.id)) { "原支出不能低于已退款金额" }
@@ -84,21 +127,26 @@ class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.c
     suspend fun updateNote(id:String,note:String)=db.withTransaction {
         dao.putEntry(entryWithNote(dao.entry(id),note,System.currentTimeMillis()))
     }
-    /** 记账表单保存「还款 / 计入预算」两个标记，与账单本身同属一次保存动作。 */
-    suspend fun setEntryBudgetFlags(id: String, inBudget: Boolean, repayment: Boolean) {
-        settings.update { st -> st.copy(
-            budgetExcludedEntries = if (inBudget) st.budgetExcludedEntries - id else st.budgetExcludedEntries + id,
-            repaymentEntries = if (repayment) st.repaymentEntries + id else st.repaymentEntries - id
-        ) }
+    /** 「还款 / 计入预算」标记现在直接存在账单上，与账单保存共用同一个 Room 事务，不再跨库写。 */
+    suspend fun setEntryBudgetFlags(id: String, inBudget: Boolean, repayment: Boolean) = db.withTransaction {
+        val e = requireNotNull(dao.entry(id)) { "账单不存在" }
+        dao.putEntry(e.copy(inBudget = inBudget, repayment = repayment, updatedAt = System.currentTimeMillis()))
     }
     /** 预算设置里把某笔账单恢复计入预算；同时清掉还款标签，避免标签与口径矛盾。 */
-    suspend fun setEntryInBudget(id: String, inBudget: Boolean) {
-        settings.update { st -> st.copy(
-            budgetExcludedEntries = if (inBudget) st.budgetExcludedEntries - id else st.budgetExcludedEntries + id,
-            repaymentEntries = if (inBudget) st.repaymentEntries - id else st.repaymentEntries
-        ) }
+    suspend fun setEntryInBudget(id: String, inBudget: Boolean) = db.withTransaction {
+        val e = requireNotNull(dao.entry(id)) { "账单不存在" }
+        dao.putEntry(e.copy(inBudget = inBudget, repayment = if (inBudget) false else e.repayment, updatedAt = System.currentTimeMillis()))
     }
     suspend fun undo(entry: Entry) { save(entry.copy(deletedAt = null)) }
+    /** 回收站恢复：按 restorationOrder 顺序写回，退款单的原支出若也软删会先恢复。 */
+    suspend fun restoreDeleted(id: String): Int = db.withTransaction {
+        val all = dao.entries()
+        val order = restorationOrder(all, id)
+        require(order.isNotEmpty()) { "账单不存在" }
+        require(all.find { it.id == id }!!.deletedAt != null) { "这笔账单未被删除" }
+        order.forEach { rid -> save(all.find { it.id == rid }!!.copy(deletedAt = null)) }
+        order.size
+    }
     suspend fun saveBudget(period: String, scope: String, limit: Long, useDefault: Boolean) = db.withTransaction {
         require(limit in 1..MAX_MONEY)
         YearMonth.parse(period)
@@ -128,13 +176,13 @@ class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.c
         dao.deleteGoalEvents(id); dao.deleteGoal(id); g to events
     }
     suspend fun undoGoal(saved: Pair<Goal, List<GoalEvent>>) = db.withTransaction { dao.putGoal(saved.first); dao.putEvents(saved.second) }
-    suspend fun restore(snapshot: Snapshot) {
+    suspend fun restore(snapshot: Snapshot) = settings.exclusive {
         val oldSettings = settings.flow.first()
         try { db.withTransaction {
             dao.clearEvents(); dao.clearGoals(); dao.clearEntries(); dao.clearBudgets(); dao.clearCategories();dao.clearTransfers();dao.clearAdjustments();dao.clearAssets()
             dao.putCategories(snapshot.categories);dao.putAssets(snapshot.assets); dao.putEntries(snapshot.entries); dao.putBudgets(snapshot.budgets); dao.putGoals(snapshot.goals); dao.putEvents(snapshot.events);dao.putTransfers(snapshot.transfers);dao.putAdjustments(snapshot.adjustments)
             settings.set(snapshot.settings.copy(enabled = false, reminderRevision = System.currentTimeMillis(), lastSentDate = ""))
-        } } catch (e: Exception) { settings.set(oldSettings); throw e }
+        } } catch (e: Exception) { withContext(NonCancellable) { settings.set(oldSettings) }; throw e }
     }
 }
 
@@ -148,10 +196,40 @@ class LedgerViewModel(app: Application) : AndroidViewModel(app) {
     val repo = (app as LedgerApp).repository
     val state = repo.snapshots.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), Snapshot())
     val notices = MutableSharedFlow<Notice>(extraBufferCapacity = 4)
+    private val _pendingRestore = MutableStateFlow<Snapshot?>(null)
+    val pendingRestore: StateFlow<Snapshot?> = _pendingRestore.asStateFlow()
+    private val _restoreBusy = MutableStateFlow(false)
+    val restoreBusy: StateFlow<Boolean> = _restoreBusy.asStateFlow()
+    private val _restoreError = MutableStateFlow<String?>(null)
+    val restoreError: StateFlow<String?> = _restoreError.asStateFlow()
+    private val _restoreRecovery = MutableStateFlow(false)
+    val restoreIsRecovery: StateFlow<Boolean> = _restoreRecovery.asStateFlow()
+    /** 恢复状态放在 ViewModel，旋转屏幕不会丢；实际写入用 viewModelScope，不随组合销毁取消。 */
+    fun proposeRestore(snapshot: Snapshot, recovery: Boolean) { _pendingRestore.value = snapshot; _restoreRecovery.value = recovery; _restoreError.value = null }
+    fun cancelRestore() { if (!_restoreBusy.value) _pendingRestore.value = null }
+    fun performRestore() {
+        val backup = _pendingRestore.value ?: return
+        if (_restoreBusy.value) return
+        _restoreBusy.value = true; _restoreError.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val app = getApplication<Application>()
+                val before = repo.snapshot()
+                BackupFiles.recovery(app, before)
+                repo.restore(backup)
+                ReminderScheduler.schedule(app, repo.settings.flow.first())
+                _pendingRestore.value = null
+                notices.emit(Notice("备份已恢复，提醒默认关闭"))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                _restoreError.value = e.message ?: "恢复失败，原数据已保留"
+            } finally { _restoreBusy.value = false }
+        }
+    }
     fun action(success: String? = null, task: suspend () -> Unit) { viewModelScope.launch(Dispatchers.IO) { try { task(); if(success != null) notices.emit(Notice(success)) } catch (e: Exception) { if (e is CancellationException) throw e; notices.emit(Notice(e.message ?: "操作失败，请重试")) } } }
     fun notify(message: String) { notices.tryEmit(Notice(message)) }
     fun delete(entry:Entry){viewModelScope.launch(Dispatchers.IO){
-        try{val old=repo.delete(entry.id);notices.emit(Notice("账单已删除"){repo.undo(old)})}
+        try{val old=repo.delete(entry.id);notices.emit(Notice("账单已删除 · 可在「我的 → 已删除账单」恢复"){repo.undo(old)})}
         catch(e:Exception){if(e is CancellationException)throw e;notices.emit(Notice("未删除"))}
     }}
     fun updateNote(id:String,note:String,done:(Boolean)->Unit){viewModelScope.launch(Dispatchers.IO){
