@@ -38,6 +38,8 @@ import java.time.*
     var time by rememberSaveable(entry?.id){mutableStateOf(entry?.time?:LocalTime.now().withSecond(0).withNano(0).toString())}
     var note by rememberSaveable(entry?.id){mutableStateOf(entry?.note?:"")}
     var continueAdding by rememberSaveable{mutableStateOf(false)}
+    var inBudget by rememberSaveable(entry?.id,key="inBudget-${entry?.id}"){mutableStateOf(entry?.let{it.id !in s.settings.budgetExcludedEntries}?:true)}
+    var repayment by rememberSaveable(entry?.id,key="repayment-${entry?.id}"){mutableStateOf(entry?.let{it.id in s.settings.repaymentEntries}?:false)}
     val original=entry?.refundOf?.let{id->s.entries.find{it.id==id}}
     val usage=remember(s.entries){s.live().groupingBy{it.categoryId}.eachCount()}
     val categories=s.categories.filter{(it.type==if(type==INCOME)INCOME else EXPENSE) && (!it.archived||it.id==catId)}.sortedWith(compareByDescending<Category>{usage[it.id]?:0}.thenBy{it.sortOrder})
@@ -53,6 +55,14 @@ import java.time.*
             Box(Modifier.weight(1.2f)){CompactAssetChoice(if(type==EXPENSE)"付款账户" else "到账账户",s,assetId,{assetId=it})}
             OutlinedButton(onClick={pickDate(context,LocalDate.parse(date)){date=it.toString()}},modifier=Modifier.weight(1f)){Icon(Icons.Outlined.CalendarToday,null,Modifier.size(16.dp));Spacer(Modifier.width(5.dp));Text(if(date==LocalDate.now().toString())"今天" else date.substring(5),maxLines=1)}
         }
+        if(type==EXPENSE)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)){
+            FilterChip(repayment,onClick={repayment=!repayment;if(repayment)inBudget=false},label={Text("还款")})
+            InfoHint("预算口径","还信用卡、还花呗等属于还款，默认不计入预算，避免与消费当期的支出重复计算。也可以只关闭右侧开关，用于报销、代付等非日常消费。账单仍计入本月收支与资产余额。")
+            Spacer(Modifier.weight(1f))
+            Text("计入预算",style=MaterialTheme.typography.labelMedium)
+            Switch(inBudget,{value->inBudget=value;if(value)repayment=false})
+        }
+        if(type==EXPENSE&&(!inBudget||repayment))Hint(if(repayment)"还款不计入预算，收支统计与资产余额不受影响。" else "本笔不计入预算，收支统计与资产余额不受影响。")
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
             NoteAction(note){note=it};Spacer(Modifier.weight(1f))
             if(assetId!=null&&!affectsBalance)Text("仅关联",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -68,10 +78,11 @@ import java.time.*
         }
     },footer={
         AmountKeypad{key->amount=keypadInput(amount,key)}
-        SubmitButton(enabled=parsed!=null,done={vm.notify("已保存");if(continueAdding&&entry==null){amount="";note=""}else onDismiss()}){
+        SubmitButton(enabled=parsed!=null,done={vm.notify("已保存");if(continueAdding&&entry==null){amount="";note="";repayment=false;inBudget=true}else onDismiss()}){
             val value=requireNotNull(keypadMoney(amount)){"请输入有效金额"};require(catId.isNotBlank()){"请先添加分类"}
             val result=(entry?:Entry(type=type,amount=value,categoryId=catId)).copy(type=type,amount=value,categoryId=catId,date=date,time=time,note=note,assetId=assetId,affectsBalance=assetId!=null&&affectsBalance)
             vm.repo.save(result)
+            vm.repo.setEntryBudgetFlags(result.id,if(type==EXPENSE)inBudget else true,type==EXPENSE&&repayment)
         }
     })
 }
@@ -79,12 +90,24 @@ import java.time.*
 @Composable fun BudgetEditor(month:YearMonth,scopeId:String,s:Snapshot,vm:LedgerViewModel,onDismiss:()->Unit){
     var scope by rememberSaveable{mutableStateOf(if(scopeId=="select")s.categories.firstOrNull{it.type==EXPENSE&&!it.archived}?.id?:"" else scopeId)}
     var amount by rememberSaveable{mutableStateOf(s.budget(month.toString(),scope)?.let{money(it.limit)}?:"")};var asDefault by rememberSaveable{mutableStateOf(false)}
+    val excluded=remember(s.entries,s.settings,month){s.excludedBudgetEntries(s.live().filter{it.date.startsWith(month.toString())})}
     EditorSheet("${month.monthValue}月预算",onDismiss){
         if(scopeId=="select")FlowRow(horizontalArrangement=Arrangement.spacedBy(7.dp)){s.categories.filter{it.type==EXPENSE&&!it.archived}.forEach{c->FilterChip(c.id==scope,onClick={scope=c.id;amount=s.budget(month.toString(),scope)?.let{money(it.limit)}?:""},label={Text(c.name)})}}
         else Hint(if(scope.isEmpty())"总预算" else s.category(scope)?.name?:"分类预算")
         OutlinedTextField(amount,{if(it.length<=12)amount=it},Modifier.fillMaxWidth(),label={Text("预算金额（元）")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),singleLine=true)
         Row{Checkbox(asDefault,{asDefault=it});TextButton(onClick={asDefault=!asDefault}){Text("同时作为以后月份的默认预算")}}
         Hint("已有单独设置的月份不受默认预算影响。总预算与分类预算分别统计。")
+        HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant.copy(alpha=.4f))
+        Heading("不计入预算的账单")
+        Hint("在「记一笔」里标记还款，或关闭「计入预算」，即可让该笔不占用预算。账单仍计入本月收支与资产余额；总预算与分类预算使用同一口径。下面可把已排除的账单恢复计入，无需保存预算。")
+        if(excluded.isEmpty())Hint("本月没有不计入预算的账单。")
+        excluded.sortedWith(compareByDescending<Entry>{it.date}.thenByDescending{it.time}).take(20).forEach{e->
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                Column(Modifier.weight(1f)){Text("${s.category(e.categoryId)?.name?:"其他"}  ¥${money(e.amount)}");Hint("${e.date.substring(5)} · ${if(s.isRepayment(e))"还款" else "手动排除"}${e.note.takeIf{it.isNotBlank()}?.let{" · $it"}?:""}")}
+                TextButton(onClick={vm.action("已恢复计入预算"){vm.repo.setEntryInBudget(e.id,true)}}){Text("恢复计入")}
+            }
+        }
+        if(excluded.size>20)Hint("仅显示最近 20 笔，本月共 ${excluded.size} 笔不计入预算。")
         SubmitButton(done={onDismiss();vm.notify("预算已保存")}){require(scopeId!="select"||scope.isNotBlank()){ "请选择分类" };vm.repo.saveBudget(month.toString(),scope,requireNotNull(parseMoney(amount)){"预算金额需大于0，最多两位小数"},asDefault)}
         if(s.budgets.any{it.period==month.toString()&&it.scope==scope})TextButton(onClick={vm.action("本月设置已移除"){vm.repo.dao.deleteBudget(month.toString(),scope);withContext(Dispatchers.Main){onDismiss()}}},modifier=Modifier.fillMaxWidth()){Text("移除本月单独预算（如有默认则沿用）")}
         if(s.budgets.any{it.period=="*"&&it.scope==scope})TextButton(onClick={vm.action("默认预算已移除"){vm.repo.dao.deleteBudget("*",scope);withContext(Dispatchers.Main){onDismiss()}}},modifier=Modifier.fillMaxWidth()){Text("移除该项默认预算")}

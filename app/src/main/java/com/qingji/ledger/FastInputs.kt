@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package com.qingji.ledger
 
 import androidx.compose.foundation.*
@@ -44,10 +44,10 @@ import androidx.compose.ui.unit.*
     if(show)TextInputDialog("备注",note,500,{show=false},onChange)
 }
 @Composable fun AssetKindPicker(kind:String,onSelect:(String)->Unit){
-    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp)){
-        ASSET_KINDS.forEach{(id,label)->Column(Modifier.weight(1f).clickable{onSelect(id)}.padding(vertical=8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(7.dp)){
+    FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp),verticalArrangement=Arrangement.spacedBy(2.dp),maxItemsInEachRow=5){
+        ASSET_KINDS.forEach{(id,label)->Column(Modifier.width(60.dp).clickable{onSelect(id)}.padding(vertical=8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(7.dp)){
             Box{AssetBadge(id,42.dp);if(kind==id)Surface(shape=RoundedCornerShape(8.dp),color=MaterialTheme.colorScheme.primaryContainer,modifier=Modifier.align(Alignment.BottomEnd).offset(4.dp,4.dp)){Icon(Icons.Outlined.Check,null,Modifier.size(16.dp),tint=MaterialTheme.colorScheme.onPrimaryContainer)}}
-            Text(label,fontSize=11.sp,fontWeight=if(id==kind)FontWeight.Bold else FontWeight.Normal,color=if(id==kind)MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(label,fontSize=11.sp,maxLines=1,fontWeight=if(id==kind)FontWeight.Bold else FontWeight.Normal,color=if(id==kind)MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }}
     }
 }

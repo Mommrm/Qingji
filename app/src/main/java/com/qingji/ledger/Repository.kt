@@ -24,8 +24,21 @@ class SettingsStore(private val context: Context) {
     private val skip = booleanPreferencesKey("skip")
     private val revision = longPreferencesKey("reminderRevision")
     private val sent = stringPreferencesKey("lastSentDate")
-    val flow: Flow<Settings> = context.settingsStore.data.map { p -> Settings(p[theme] ?: "SYSTEM", p[enabled] ?: false, p[time] ?: "21:30", (p[days] ?: (1..7).map { it.toString() }.toSet()).mapNotNull { it.toIntOrNull() }.toSet(), p[skip] ?: true, p[revision] ?: 1L, p[sent] ?: "",normalizeAccent(p[accent]?:"SUN")) }
-    suspend fun set(settings: Settings) { context.settingsStore.edit { p -> p[theme] = settings.theme; p[accent]=normalizeAccent(settings.accent);p[enabled] = settings.enabled; p[time] = settings.time; p[days] = settings.days.map { it.toString() }.toSet(); p[skip] = settings.skip; p[revision] = settings.reminderRevision; p[sent] = settings.lastSentDate } }
+    private val budgetExcludedEntries = stringSetPreferencesKey("budgetExcludedEntries")
+    private val repaymentEntries = stringSetPreferencesKey("repaymentEntries")
+    val flow: Flow<Settings> = context.settingsStore.data.map { p -> Settings(
+        theme = p[theme] ?: "SYSTEM",
+        enabled = p[enabled] ?: false,
+        time = p[time] ?: "21:30",
+        days = (p[days] ?: REMINDER_ALL_DAYS.map { it.toString() }.toSet()).mapNotNull { it.toIntOrNull() }.toSet(),
+        skip = p[skip] ?: true,
+        reminderRevision = p[revision] ?: 1L,
+        lastSentDate = p[sent] ?: "",
+        accent = normalizeAccent(p[accent]?:"SUN"),
+        budgetExcludedEntries = p[budgetExcludedEntries] ?: emptySet(),
+        repaymentEntries = p[repaymentEntries] ?: emptySet()
+    ) }
+    suspend fun set(settings: Settings) { context.settingsStore.edit { p -> p[theme] = settings.theme; p[accent]=normalizeAccent(settings.accent);p[enabled] = settings.enabled; p[time] = settings.time; p[days] = settings.days.map { it.toString() }.toSet(); p[skip] = settings.skip; p[revision] = settings.reminderRevision; p[sent] = settings.lastSentDate; p[budgetExcludedEntries] = settings.budgetExcludedEntries; p[repaymentEntries] = settings.repaymentEntries } }
     suspend fun update(transform: (Settings) -> Settings) { updateMutex.withLock { set(transform(flow.first())) } }
 }
 
@@ -70,6 +83,20 @@ class Repository(val context: Context, val db: LedgerDatabase = LedgerDatabase.c
     }
     suspend fun updateNote(id:String,note:String)=db.withTransaction {
         dao.putEntry(entryWithNote(dao.entry(id),note,System.currentTimeMillis()))
+    }
+    /** 记账表单保存「还款 / 计入预算」两个标记，与账单本身同属一次保存动作。 */
+    suspend fun setEntryBudgetFlags(id: String, inBudget: Boolean, repayment: Boolean) {
+        settings.update { st -> st.copy(
+            budgetExcludedEntries = if (inBudget) st.budgetExcludedEntries - id else st.budgetExcludedEntries + id,
+            repaymentEntries = if (repayment) st.repaymentEntries + id else st.repaymentEntries - id
+        ) }
+    }
+    /** 预算设置里把某笔账单恢复计入预算；同时清掉还款标签，避免标签与口径矛盾。 */
+    suspend fun setEntryInBudget(id: String, inBudget: Boolean) {
+        settings.update { st -> st.copy(
+            budgetExcludedEntries = if (inBudget) st.budgetExcludedEntries - id else st.budgetExcludedEntries + id,
+            repaymentEntries = if (inBudget) st.repaymentEntries - id else st.repaymentEntries
+        ) }
     }
     suspend fun undo(entry: Entry) { save(entry.copy(deletedAt = null)) }
     suspend fun saveBudget(period: String, scope: String, limit: Long, useDefault: Boolean) = db.withTransaction {
@@ -133,4 +160,5 @@ class LedgerViewModel(app: Application) : AndroidViewModel(app) {
     }}
     fun removeGoal(goal: Goal) { action { val old = repo.removeGoal(goal.id); notices.emit(Notice("目标已删除") { repo.undoGoal(old) }) } }
     fun updateSettings(transform: (Settings) -> Settings) { action { repo.settings.update { transform(it).copy(reminderRevision = System.currentTimeMillis()) }; ReminderScheduler.schedule(getApplication(), repo.settings.flow.first()) } }
+    fun updatePreferences(transform: (Settings) -> Settings) { action { repo.settings.update(transform) } }
 }

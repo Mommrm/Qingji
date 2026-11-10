@@ -23,7 +23,7 @@ object BackupCodec {
         "assets" to array(s.assets.map{a->obj("id" to a.id,"name" to a.name,"kind" to a.kind,"openingBalance" to a.openingBalance,"archived" to a.archived,"createdAt" to a.createdAt,"updatedAt" to a.updatedAt)}),
         "transfers" to array(s.transfers.map{t->obj("id" to t.id,"fromAssetId" to t.fromAssetId,"toAssetId" to t.toAssetId,"amount" to t.amount,"date" to t.date,"note" to t.note,"createdAt" to t.createdAt,"updatedAt" to t.updatedAt,"deletedAt" to t.deletedAt)}),
         "adjustments" to array(s.adjustments.map{a->obj("id" to a.id,"assetId" to a.assetId,"delta" to a.delta,"targetBalance" to a.targetBalance,"date" to a.date,"note" to a.note,"createdAt" to a.createdAt,"updatedAt" to a.updatedAt,"deletedAt" to a.deletedAt)}),
-        "settings" to obj("theme" to s.settings.theme,"accent" to s.settings.accent,"enabled" to s.settings.enabled,"time" to s.settings.time,"days" to JSONArray(s.settings.days.sorted()),"skip" to s.settings.skip)
+        "settings" to obj("theme" to s.settings.theme,"accent" to s.settings.accent,"enabled" to s.settings.enabled,"time" to s.settings.time,"days" to JSONArray(s.settings.days.sorted()),"skip" to s.settings.skip,"budgetExcludedEntries" to JSONArray(s.settings.budgetExcludedEntries.sorted()),"repaymentEntries" to JSONArray(s.settings.repaymentEntries.sorted()))
     ).toString(2)
     private fun list(root: JSONObject, key: String, maximum: Int = 200_000): List<JSONObject> { val a = root.getJSONArray(key); require(a.length() <= maximum) { "备份记录数量超限" }; return (0 until a.length()).map { a.getJSONObject(it) } }
     private fun text(o: JSONObject, key: String, max: Int = 200): String = o.getString(key).also { require(it.length <= max) { "备份字段过长：$key" } }
@@ -60,6 +60,16 @@ object BackupCodec {
         unique(events) { it.id };events.forEach { require(it.goalId in goalIds && it.amount!=0L && it.amount in -MAX_MONEY..MAX_MONEY);LocalDate.parse(it.date) }
         events.groupBy { it.goalId }.values.forEach { list -> var progress=0L;list.sortedBy { it.createdAt }.forEach { progress=Math.addExact(progress,it.amount);require(progress in 0..MAX_MONEY) { "备份攒钱进度无效" } } }
         val p=root.getJSONObject("settings");val dayArray=p.getJSONArray("days");val days=(0 until dayArray.length()).map { dayArray.getInt(it) }.toSet();val theme=text(p,"theme")
+        fun idSet(key: String): Set<String> {
+            val a=p.optJSONArray(key)?:JSONArray()
+            require(a.length()<=200_000){"备份预算标记数量超限：$key"}
+            val ids=(0 until a.length()).map{a.getString(it)}.toSet()
+            require(ids.all{it.isNotBlank()&&it.length<=200}){"备份预算标记无效：$key"}
+            return ids
+        }
+        val excludedEntries=idSet("budgetExcludedEntries")
+        val repayments=idSet("repaymentEntries")
+        require(excludedEntries.all{it in entryMap}&&repayments.all{it in entryMap}){"备份预算标记引用了不存在的账单"}
         require(days.isNotEmpty() && days.all { it in 1..7 } && theme in listOf("SYSTEM","LIGHT","DARK")) { "备份偏好设置无效" }
         val time=text(p,"time");val t=LocalTime.parse(time);require(t<LocalTime.of(23,0)) { "提醒时间需早于23:00" }
         val accent=p.optString("accent","SUN");require(validAccent(accent)){"备份主题色格式无效"}
@@ -71,7 +81,7 @@ object BackupCodec {
         unique(transfers){it.id};transfers.forEach{require(it.fromAssetId in assetIds&&it.toAssetId in assetIds&&it.fromAssetId!=it.toAssetId&&it.amount in 1..MAX_MONEY){"备份转账信息无效"};LocalDate.parse(it.date)}
         val adjustments=if(version<2)emptyList()else list(root,"adjustments").map{a->AssetAdjustment(text(a,"id"),text(a,"assetId"),long(a,"delta"),long(a,"targetBalance"),text(a,"date"),text(a,"note",500),long(a,"createdAt"),long(a,"updatedAt"),if(a.isNull("deletedAt"))null else long(a,"deletedAt"))}
         unique(adjustments){it.id};adjustments.forEach{require(it.assetId in assetIds&&it.delta!=0L&&it.delta!=Long.MIN_VALUE&&it.targetBalance in 0..MAX_MONEY){"备份余额校准无效"};LocalDate.parse(it.date)}
-        val snapshot=Snapshot(entries,cats,budgets,goals,events,Settings(theme,p.getBoolean("enabled"),time,days,p.getBoolean("skip"),accent=normalizeAccent(accent)),true,assets,transfers,adjustments)
+        val snapshot=Snapshot(entries,cats,budgets,goals,events,Settings(theme=theme,enabled=p.getBoolean("enabled"),time=time,days=days,skip=p.getBoolean("skip"),accent=normalizeAccent(accent),budgetExcludedEntries=excludedEntries,repaymentEntries=repayments),true,assets,transfers,adjustments)
         val balances=snapshot.assetBalances();snapshot.assetTotal();require(assets.filter{it.archived}.all{balances[it.id]==0L}){"已归档资产的余额应为0"}
         return snapshot
     }

@@ -38,7 +38,7 @@ data class Goal(@PrimaryKey val id: String = newId(), val title: String, val tar
 @Entity(tableName = "goal_events", indices = [Index("goalId")])
 data class GoalEvent(@PrimaryKey val id: String = newId(), val goalId: String, val amount: Long, val date: String = LocalDate.now().toString(), val note: String = "", val createdAt: Long = System.currentTimeMillis())
 
-data class Settings(val theme: String = "SYSTEM", val enabled: Boolean = false, val time: String = "21:30", val days: Set<Int> = (1..7).toSet(), val skip: Boolean = true, val reminderRevision: Long = 1, val lastSentDate: String = "",val accent:String="SUN")
+data class Settings(val theme: String = "SYSTEM", val enabled: Boolean = false, val time: String = "21:30", val days: Set<Int> = (1..7).toSet(), val skip: Boolean = true, val reminderRevision: Long = 1, val lastSentDate: String = "",val accent:String="SUN", val budgetExcludedEntries:Set<String> = emptySet(), val repaymentEntries:Set<String> = emptySet())
 data class Snapshot(val entries: List<Entry> = emptyList(), val categories: List<Category> = emptyList(), val budgets: List<Budget> = emptyList(), val goals: List<Goal> = emptyList(), val events: List<GoalEvent> = emptyList(), val settings: Settings = Settings(), val ready: Boolean = false, val assets: List<AssetAccount> = emptyList(), val transfers: List<AssetTransfer> = emptyList(), val adjustments: List<AssetAdjustment> = emptyList()) {
     fun category(id: String) = categories.find { it.id == id }
     fun progress(id: String): Long = events.filter { it.goalId == id }.sumOf { it.amount }
@@ -98,4 +98,39 @@ fun defaultCategories(): List<Category> {
     val expense = listOf("餐饮" to "◒", "购物" to "◇", "交通" to "↗", "居住" to "⌂", "娱乐" to "♫", "日用" to "▧", "医疗" to "✚", "学习" to "▤", "人情" to "♡", "其他" to "○")
     val income = listOf("工资" to "▤", "奖金" to "☆", "兼职" to "↗", "理财收益" to "◇", "其他" to "○")
     return expense.mapIndexed { i, p -> Category("expense-$i", p.first, EXPENSE, p.second, i) } + income.mapIndexed { i, p -> Category("income-$i", p.first, INCOME, p.second, i) }
+}
+
+val WEEKDAY_LABELS = listOf("一","二","三","四","五","六","日")
+val REMINDER_ALL_DAYS = (1..7).toSet()
+val REMINDER_PRESETS = listOf("每天" to REMINDER_ALL_DAYS, "工作日" to (1..5).toSet(), "周末" to setOf(6,7))
+fun normalizeReminderDays(days: Set<Int>): Set<Int> = days.filter { it in 1..7 }.toSet().ifEmpty { REMINDER_ALL_DAYS }
+fun repeatSummary(days: Set<Int>): String {
+    val valid = days.filter { it in 1..7 }.toSet()
+    if (valid.isEmpty()) return "未选择提醒日"
+    REMINDER_PRESETS.firstOrNull { it.second == valid }?.let { return it.first }
+    return "每周" + valid.sorted().joinToString("、") { WEEKDAY_LABELS[it - 1] }
+}
+fun nextReminderText(settings: Settings, now: ZonedDateTime = ZonedDateTime.now()): String {
+    val next = nextReminder(settings, now) ?: return "暂无下次提醒"
+    return "下次提醒：" + next.format(java.time.format.DateTimeFormatter.ofPattern("M月d日 E HH:mm", java.util.Locale.CHINA))
+}
+/** 预算排除以「账单」为单位：记账时标记还款，或手动关闭「计入预算」。 */
+fun Snapshot.excludedBudgetEntries(entries: List<Entry>): List<Entry> =
+    entries.filter { it.deletedAt == null && it.type == EXPENSE && it.id in settings.budgetExcludedEntries }
+fun Snapshot.isRepayment(entry: Entry): Boolean = entry.id in settings.repaymentEntries
+fun budgetExpense(entries: List<Entry>, excluded: Set<String>): Long {
+    if (excluded.isEmpty()) return totals(entries).expense
+    val byId = entries.associateBy { it.id }
+    var gross = 0L
+    var refunds = 0L
+    entries.filter { it.deletedAt == null }.forEach { e ->
+        when (e.type) {
+            EXPENSE -> if (e.id !in excluded) gross += e.amount
+            REFUND -> {
+                val origin = e.refundOf?.let { byId[it] }
+                if (origin == null || origin.id !in excluded) refunds += e.amount
+            }
+        }
+    }
+    return gross - refunds
 }

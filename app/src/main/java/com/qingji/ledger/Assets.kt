@@ -5,8 +5,10 @@ import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-val ASSET_KINDS = linkedMapOf("BANK" to "银行卡", "WECHAT" to "微信", "ALIPAY" to "支付宝", "CASH" to "现金", "OTHER" to "其他")
-fun assetIcon(kind:String):String=when(kind){"BANK"->"▤";"WECHAT"->"聊";"ALIPAY"->"支";"CASH"->"¥";else->"◇"}
+val ASSET_KINDS = linkedMapOf("BANK" to "银行卡", "WECHAT" to "微信", "ALIPAY" to "支付宝", "CASH" to "现金", "OTHER" to "其他", "CREDIT_CARD" to "信用卡", "HUABEI" to "花呗", "CREDIT" to "信用支付")
+val CREDIT_ASSET_KINDS = setOf("CREDIT_CARD", "HUABEI", "CREDIT")
+fun isCreditAsset(kind:String):Boolean = kind in CREDIT_ASSET_KINDS
+fun assetIcon(kind:String):String=when(kind){"BANK"->"▤";"WECHAT"->"聊";"ALIPAY"->"支";"CASH"->"¥";"CREDIT_CARD"->"卡";"HUABEI"->"呗";else->"◇"}
 fun parseBalance(raw:String):Long? = if(raw.trim().matches(Regex("0(\\.0{1,2})?")))0 else parseMoney(raw)
 
 @Entity(tableName="asset_accounts")

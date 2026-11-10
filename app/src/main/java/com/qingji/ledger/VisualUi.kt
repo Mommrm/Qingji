@@ -28,11 +28,11 @@ import kotlin.math.roundToInt
 }
 @Composable fun AssetBadge(kind:String,side:Dp=40.dp){
     val brand=kind=="WECHAT"||kind=="ALIPAY"
-    val bg=when(kind){"WECHAT"->Color(0xFF07C160);"ALIPAY"->Color.White;"BANK"->MaterialTheme.colorScheme.surfaceContainer;"CASH"->Color(0xFFE9F5EC);else->MaterialTheme.colorScheme.surfaceContainer}
+    val bg=when(kind){"WECHAT"->Color(0xFF07C160);"ALIPAY"->Color.White;"BANK"->MaterialTheme.colorScheme.surfaceContainer;"CASH"->Color(0xFFE9F5EC);"CREDIT_CARD"->Color(0xFFFDEDE6);"HUABEI"->Color(0xFFE7F1FF);"CREDIT"->Color(0xFFF1EBFA);else->MaterialTheme.colorScheme.surfaceContainer}
     Surface(shape=RoundedCornerShape(side*.28f),color=bg,modifier=Modifier.size(side)){
         Box(contentAlignment=Alignment.Center){
             if(brand)Icon(painterResource(if(kind=="WECHAT")R.drawable.ic_wechat else R.drawable.ic_alipay),ASSET_KINDS[kind],Modifier.size(side*.7f),tint=Color.Unspecified)
-            else Icon(when(kind){"BANK"->Icons.Outlined.AccountBalance;"CASH"->Icons.Outlined.Payments;else->Icons.Outlined.AccountBalanceWallet},ASSET_KINDS[kind]?:"其他",Modifier.size(side*.58f),tint=if(kind=="CASH")Color(0xFF287747)else MaterialTheme.colorScheme.onSurfaceVariant)
+            else Icon(when(kind){"BANK"->Icons.Outlined.AccountBalance;"CASH"->Icons.Outlined.Payments;"CREDIT_CARD","HUABEI","CREDIT"->Icons.Outlined.CreditCard;else->Icons.Outlined.AccountBalanceWallet},ASSET_KINDS[kind]?:"其他",Modifier.size(side*.58f),tint=if(kind=="CASH")Color(0xFF287747)else MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
